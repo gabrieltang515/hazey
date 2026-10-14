@@ -1,7 +1,7 @@
 import { API_URL, PM25_API_URL, REFRESH_INTERVAL, normalizePm25, normalizePsi, isStale, telegramReading } from "./psi.js";
 import { REGIONS } from "../public/psi.js";
 
-const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI and 1-hour PM2.5, all regions\n/psi north — one region\n/pm25 — 1-hour PM2.5 only (also /pm25 north)\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
+const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
 function json(body, status = 200, extraHeaders = {}) {
   return Response.json(body, { status, headers: {
@@ -124,7 +124,7 @@ async function handleTelegram(request, env, ctx) {
       if (argument && !REGIONS.includes(argument)) {
         text = `Choose north, south, east, west, or central.\n\nExample: /${command} west\nAll regions: /${command}`;
       } else {
-        try { text = telegramReading(await latest(env, ctx, true), argument || null, { pm25Only: command === "pm25" }); }
+        try { text = telegramReading(await latest(env, ctx, true), argument || null, { dataset: command }); }
         catch { text = `NEA readings are temporarily unavailable and there is no saved reading yet. Please try /${command} again shortly.`; }
       }
     }

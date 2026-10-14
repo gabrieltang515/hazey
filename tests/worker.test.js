@@ -95,7 +95,7 @@ test("valid regional commands reply once and duplicate updates are ignored", asy
   assert.equal((await worker.fetch(webhook(10, "/psi west"), env, ctx)).status, 200);
   assert.equal((await worker.fetch(webhook(10, "/psi west"), env, ctx)).status, 200);
   assert.equal(replies.length, 1); assert.match(replies[0].text, /West: 101 — Unhealthy/);
-  assert.match(replies[0].text, /1-hour PM2.5 \(µg\/m³\)\nWest: 257 — Very high \(Band IV\)/);
+  assert.doesNotMatch(replies[0].text, /µg\/m³|Band/, "/psi shows PSI only");
   assert.doesNotMatch(replies[0].text, /North:/);
   assert.equal(db.prepare("SELECT state FROM telegram_updates").get().state, "sent");
 });
@@ -175,7 +175,7 @@ test("PM2.5 failures never block PSI, and saved PM2.5 survives later PM2.5 failu
   assert.equal(saved.regions.length, 5);
 });
 
-test("/pm25 replies with banded 1-hour PM2.5 only; /psi labels PSI and PM2.5 separately", async t => {
+test("/pm25 replies with banded 1-hour PM2.5 only; /psi replies with PSI only; help lists both", async t => {
   const { env, ctx } = setup(t);
   const replies = [];
   t.mock.method(globalThis, "fetch", async (url, init) => {
@@ -184,7 +184,12 @@ test("/pm25 replies with banded 1-hour PM2.5 only; /psi labels PSI and PM2.5 sep
   });
   assert.equal((await worker.fetch(webhook(30, "/pm25 West"), env, ctx)).status, 200);
   assert.equal((await worker.fetch(webhook(31, "/psi"), env, ctx)).status, 200);
+  assert.equal((await worker.fetch(webhook(32, "/pm25"), env, ctx)).status, 200);
+  assert.equal((await worker.fetch(webhook(33, "/help"), env, ctx)).status, 200);
   assert.match(replies[0], /West: 257 — Very high \(Band IV\)/);
   assert.doesNotMatch(replies[0], /24-hour PSI|North:/);
-  assert.match(replies[1], /24-hour PSI\n[\s\S]*Central: 200 — Unhealthy[\s\S]*1-hour PM2.5 \(µg\/m³\)\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
+  assert.match(replies[1], /24-hour PSI\n\nNorth: 50 — Good[\s\S]*Central: 200 — Unhealthy/);
+  assert.doesNotMatch(replies[1], /µg\/m³|Band/);
+  assert.match(replies[2], /1-hour PM2.5 \(µg\/m³\)\n\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
+  assert.match(replies[3], /\/pm25 — 1-hour PM2.5, all regions\n\/pm25 north — PM2.5 for one region/);
 });

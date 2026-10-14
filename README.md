@@ -21,7 +21,7 @@ PM2.5 is shown separately as a **1-hour concentration in µg/m³** (`pm25_one_ho
 - Cloudflare D1 stores one latest PSI snapshot and one latest PM2.5 snapshot. A five minute scheduled Worker job refreshes both; requests also refresh an overdue cache.
 - Atomic database leases prevent concurrent source refreshes. An older reading cannot replace a newer observation.
 - Saved readings remain available during NEA outages, with an explicit delayed-data label. Cold-start failures display an error instead of sample values.
-- Telegram `/start`, `/help`, `/psi` (PSI and PM2.5), `/psi west`, `/pm25`, and `/pm25 west` commands. The webhook requires Telegram’s secret header and records handled update IDs for retry deduplication.
+- Telegram `/start`, `/help`, `/psi` and `/psi west` (24-hour PSI only), and `/pm25` and `/pm25 west` (1-hour PM2.5 only) commands. The webhook requires Telegram’s secret header and records handled update IDs for retry deduplication.
 - Private setup script configures Worker secrets, Telegram commands, the webhook, and dashboard links. Tokens are never stored in source files.
 
 ## Cloudflare Free setup

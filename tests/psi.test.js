@@ -50,7 +50,8 @@ test("bot replies show all regions, SGT, categories, and stale warnings", () => 
   const all = telegramReading(result, null, { now });
   for (const region of REGIONS) assert.match(all.toLowerCase(), new RegExp(`${region}:`));
   assert.match(all, /24-hour PSI/); assert.match(all, /SGT/); assert.doesNotMatch(all, /saved/);
-  assert.match(all, /1-hour PM2.5: not available yet/);
+  assert.doesNotMatch(all, /µg\/m³|not available/, "PSI replies never include PM2.5");
+  assert.match(telegramReading(result, null, { now, dataset: "pm25" }), /PM2.5 readings are not available yet/);
   const west = telegramReading(result, "west", { now: now + 16 * 60_000 });
   assert.match(west, /West: 153 — Unhealthy/); assert.doesNotMatch(west, /North:/);
   assert.match(west, /saved PSI readings/);
@@ -88,7 +89,7 @@ test("PM2.5 uses the live v2 one-hour shape and rejects invalid regional values"
     assert.throws(() => normalizePm25(body));
   }
   assert.throws(() => normalizePm25({ code: 0, data: { items: [] } }));
-  const reply = telegramReading({ ...normalizePsi(fixture(), now), pm25: result }, "east", { now, pm25Only: true });
-  assert.match(reply, /1-hour PM2.5 \(µg\/m³\)\nEast: 190 — High \(Band III\)\nReading: .*SGT/);
+  const reply = telegramReading({ ...normalizePsi(fixture(), now), pm25: result }, "east", { now, dataset: "pm25" });
+  assert.match(reply, /1-hour PM2.5 \(µg\/m³\)\n\nEast: 190 — High \(Band III\)\n\nReading: .*SGT/);
   assert.doesNotMatch(reply, /PSI\n|West:/);
 });

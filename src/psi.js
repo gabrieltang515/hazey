@@ -59,30 +59,30 @@ const pick = (regions, selected) => selected ? regions.filter(r => r.key === sel
 
 function psiSection(snapshot, selectedRegion, now) {
   return [
-    "24-hour PSI",
+    "Singapore · 24-hour PSI", "",
     ...pick(snapshot.regions, selectedRegion).map(r => `${r.name}: ${r.psi} — ${category(r.psi).label}`),
-    `Reading: ${singaporeTime(snapshot.readingAt)} SGT`,
+    "", `Reading: ${singaporeTime(snapshot.readingAt)} SGT`,
     ...(isStale(snapshot, now) ? ["⚠️ Showing saved PSI readings. Fresh data is currently delayed."] : [])
   ];
 }
 
 function pm25Section(pm25, selectedRegion, now) {
-  if (!pm25) return ["1-hour PM2.5: not available yet. Please try again shortly."];
+  if (!pm25) return ["Singapore · 1-hour PM2.5", "", "PM2.5 readings are not available yet. Please try /pm25 again shortly."];
   return [
-    "1-hour PM2.5 (µg/m³)",
+    "Singapore · 1-hour PM2.5 (µg/m³)", "",
     ...pick(pm25.regions, selectedRegion).map(r => {
       const band = pm25Band(r.pm25);
       return `${r.name}: ${r.pm25} — ${band.label} (Band ${band.band})`;
     }),
-    `Reading: ${singaporeTime(pm25.readingAt)} SGT`,
+    "", `Reading: ${singaporeTime(pm25.readingAt)} SGT`,
     ...(isStale(pm25, now) ? ["⚠️ Showing saved PM2.5 readings. Fresh data is currently delayed."] : [])
   ];
 }
 
-export function telegramReading(snapshot, selectedRegion, { pm25Only = false, now = Date.now() } = {}) {
-  const sections = pm25Only ? [pm25Section(snapshot.pm25, selectedRegion, now)]
-    : [psiSection(snapshot, selectedRegion, now), pm25Section(snapshot.pm25, selectedRegion, now)];
-  const hint = pm25Only ? "All regions: /pm25 · One region: /pm25 west · With PSI: /psi"
-    : "All regions: /psi · One region: /psi west · PM2.5 only: /pm25";
-  return ["Singapore air quality", "", ...sections.flatMap(section => [...section, ""]), "Source: NEA via data.gov.sg", "", hint].join("\n");
+export function telegramReading(snapshot, selectedRegion, { dataset = "psi", now = Date.now() } = {}) {
+  const pm25 = dataset === "pm25";
+  const section = pm25 ? pm25Section(snapshot.pm25, selectedRegion, now) : psiSection(snapshot, selectedRegion, now);
+  const hint = pm25 ? "All regions: /pm25 · One region: /pm25 west · PSI: /psi"
+    : "All regions: /psi · One region: /psi west · PM2.5: /pm25";
+  return [...section, "Source: NEA via data.gov.sg", "", hint].join("\n");
 }
