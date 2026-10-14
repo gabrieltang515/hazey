@@ -1,60 +1,54 @@
 # Hazey handover
 
-Updated: 14 October 2026, Singapore time. Channel work is ready for the Cloudflare owner to deploy; the earlier live release remains unchanged.
+Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg); the dashboard and command bot are unchanged.
 
-## Channel automation work — 14 October 2026
+## Channel broadcasts — live since 15 October 2026
 
-The owner created the public channel [@hazey_sg](https://t.me/hazey_sg) and confirmed that `@hazey_sg_bot` is an administrator with Post Messages enabled.
+The owner created the public channel [@hazey_sg](https://t.me/hazey_sg) and confirmed that `@hazey_sg_bot` is an administrator with Post Messages enabled. The channel code was written on 14 October in a checkout without Cloudflare access, then activated by the owner on 15 October (see the activation record below).
 
-- Implemented channel broadcasts and configured `TELEGRAM_CHANNEL_ID` as `@hazey_sg`. The existing command bot and dashboard are preserved.
+- `TELEGRAM_CHANNEL_ID` is `@hazey_sg` in `wrangler.jsonc` vars. The existing command bot and dashboard are preserved.
 - Regular slots: 02:00, 06:00, 10:00, 14:00, 18:00 and 22:00 SGT. Upper end of NEA's overall 24-hour PSI range >200 sends immediately when detected by the five-minute cron, then on clock hours. An existing episode holds at exactly 200 and clears strictly below 200, silently. No recovery post; only one post for overlapping slots.
 - Overall PSI is the minimum–maximum range of NEA's five regional readings. Broadcasts include all five regions' PSI and separate 1-hour PM2.5 readings/timestamps, the website, and PSI-based precautions paraphrased from the MOH advisory on NEA's Managing Haze page (checked 14 October 2026).
-- New `migrations/0004_channel_broadcasts.sql` persists observed alert mode independently of delivery, a pending first alert, successful reporting slots, the processed observation/revision and an atomic channel lease. Failed delivery can retry; recovery cancels pending alerts. Older observations cannot move the mode backwards. Telegram still cannot guarantee exactly-once delivery after ambiguous network failure.
+- `migrations/0004_channel_broadcasts.sql` persists observed alert mode independently of delivery, a pending first alert, successful reporting slots, the processed observation/revision and an atomic channel lease. Failed delivery can retry; recovery cancels pending alerts. Older observations cannot move the mode backwards. Telegram still cannot guarantee exactly-once delivery after ambiguous network failure.
 - Scheduled reports wait for the current hour's observation. Stale or future PSI, or a failed refresh, never sends or clears the episode. Missing PM2.5 is labelled; delayed saved PM2.5 remains labelled and does not block PSI.
 - Future PSI and PM2.5 observations are rejected before cache writes, so they cannot block subsequent valid readings. A stale source response cannot trigger a post from a retained fresh cache.
-- Verification: 40 Node tests pass (26 existing +14 channel/regression tests using real SQLite), Wrangler deployment dry run passes, dependency audit reports no vulnerabilities. Independent review found three delivery/freshness/ordering issues; all were fixed with regression tests and the reviewer confirmed the fixes with a second 40/40 test run. The broadcast message was also previewed using real NEA readings, without posting to Telegram.
-- **Activation pending, intentionally left to the Cloudflare owner:** the requester does not own the Cloudflare account and asked for GitHub commit/push and owner handoff. No production migration, deployment or channel post was performed. The Windows checkout's expired Cloudflare login attempt timed out; do not continue its OAuth flow. Never recreate the existing D1 database or rotate existing secrets unnecessarily.
+- Pre-activation verification (14 October): 40 Node tests (26 existing + 14 channel/regression tests using real SQLite), Wrangler dry run, and a clean dependency audit. An independent review found three delivery/freshness/ordering issues; all were fixed with regression tests and re-verified.
 
-### Cloudflare owner: activate the channel
+### Activation record — 15 October 2026
 
-Pull the latest `main` in the existing checkout, then run:
+Performed by the owner's agent on the Mac checkout, from `main` at `658a04f`:
 
-```sh
-git pull --ff-only origin main
-npm ci
-npm test
-npx wrangler login
-npx wrangler whoami
-npm run db:remote
-npx wrangler deploy --dry-run
-npm run deploy
-npx wrangler tail --format pretty
-```
+- `npm ci` (0 vulnerabilities), `npm test` **40/40 pass**, `wrangler deploy --dry-run` passed, and local migrations 0001–0004 applied cleanly.
+- `npx wrangler login` with the owner's account (`ce0cad81…`). The remote migration list showed only `0004_channel_broadcasts.sql` pending; it was applied to production `hazey-psi` at 07:08 SGT, **before** deploying.
+- `npx wrangler deploy` at 07:09 SGT produced version **`374e97dd-c9a6-4bd3-86ea-8013dde66e78`** (100% of traffic, `*/5 * * * *` trigger). Existing secrets `NEA_API_KEY`, `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` were reused; the bot setup helper was not rerun and no secret was rotated.
+- The 7 am reading had West at PSI 206, so the first cron after deploy (07:10, `Ok`) logged `Channel broadcast sent (breach)` and posted [t.me/hazey_sg/2](https://t.me/hazey_sg/2) at 07:10:48 SGT: "⚠️ Hazey • PSI alert", overall 124–206 (Unhealthy to Very unhealthy), all five regions' PSI and PM2.5 for 7:00 am SGT, the PSI 201–300 precautions, the MOH/NEA link, and the dashboard button. The public post was read back from `t.me/s/hazey_sg` and matches the format above.
+- Production `channel_broadcasts` afterwards: `alert_active=1`, `pending_breach=0`, `last_slot` 07:00 SGT, lease released. The 07:15 cron (logged as two scheduled invocations, 07:15:40 and 07:15:55, both `Ok`) posted nothing further: the channel still had exactly one alert and one `Channel broadcast sent` log line.
+- Post-deploy smoke: `/`, `/api/psi`, `/api/history` and assets return 200; an unauthenticated `POST /telegram/webhook` returns 401; a Telegram webhook update at 07:09 SGT was answered `Ok`.
 
-Use the existing `gabrieltang515` Cloudflare account and `hazey-psi` D1 database. Apply **0004 before deploying** the new Worker; existing migrations should already be recorded. The current `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` and `NEA_API_KEY` secrets are reused automatically. Do not rerun the bot setup helper merely to enable the channel: it rotates the webhook secret and is unnecessary here.
+What to expect next: while the episode is active, one hourly update posts per clock hour once NEA publishes that hour's reading (`Channel broadcast sent (hourly)`). When the highest regional PSI falls strictly below 200 the episode ends silently and the four-hourly regular slots resume (`… (regular)`).
 
-Confirm `@hazey_sg_bot` still has Post Messages permission in `@hazey_sg`. The five-minute cron begins sending once deployed: if fresh overall PSI is already above 200, its first successful check sends an immediate alert; otherwise the next designated four-hour slot sends once NEA publishes that hour's reading. No manual test-message endpoint was added.
+To disable broadcasts, remove `TELEGRAM_CHANNEL_ID` from `wrangler.jsonc` vars and redeploy; the additive D1 table can remain. Telegram errors and upstream failures are logged without tokens, and failed sends retry on later checks. Never recreate the existing D1 database or rotate secrets unnecessarily, and do not rerun the bot setup helper just to touch the channel (it rotates the webhook secret).
 
-Verify both a real channel message and `Channel broadcast sent (breach/hourly/regular)` in the Worker logs. The owner's next agent should then update this handover with the new deployment version, the applied remote migration and observed delivery evidence. Telegram errors or upstream failures are logged without tokens; failed sends retry on later checks. For rollback/disable, remove `TELEGRAM_CHANNEL_ID` from configuration and redeploy; the additive D1 table can remain.
-
-The older completion statements below describe the dashboard/command-bot release before channel automation.
+The completion statements below were written for the dashboard/command-bot release; the status list, resources table and commands have been updated for the channel release.
 
 ## Requested outcome and current status
 
 The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot showing the latest regional Singapore PSI from NEA/data.gov.sg, using Cloudflare Free storage, plus a private GitHub repository with this handover. On 14 October 2026 they also asked for PM2.5 levels and then a sleeker frontend (buildless, shadcn-style, with 24-hour trend charts, dark mode, a region map, and live relative times), which they approved from screenshots before it was deployed.
 
 - **Web app: redesigned, deployed and working** at https://hazey.gabrieltang515.workers.dev, with 24-hour PSI **and** NEA 1-hour PM2.5 for all five regions, a banded region map, 24-hour trends, and light/dark themes.
-- **Storage: provisioned and initialized** in Cloudflare D1. Migrations `0001_init.sql`, `0002_pm25.sql`, and `0003_history.sql` are applied to production and local.
+- **Storage: provisioned and initialized** in Cloudflare D1. Migrations `0001_init.sql`, `0002_pm25.sql`, `0003_history.sql`, and `0004_channel_broadcasts.sql` are applied to production and local.
 - **NEA API key: installed** by the owner as the Worker secret `NEA_API_KEY` at ~18:15 SGT. Before it, the 18:00 scheduled refresh got HTTP `429`; afterwards every observed five-minute refresh (18:20, 18:35, 18:40, 18:45, 18:50) saved on schedule.
 - **Telegram bot: activated as [@hazey_sg_bot](https://t.me/hazey_sg_bot).** The owner created it in BotFather and ran the hidden-prompt setup helper, which installed `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, registered the webhook, set the command menu, and redeployed. Production logs show four real Telegram updates at 17:59–18:00 SGT, each answered `200`; the Worker returns `200` only after Telegram's `sendMessage` succeeds. The owner then confirmed the replies looked right.
+- **Telegram channel: live as [@hazey_sg](https://t.me/hazey_sg)** since 15 October 2026, 07:10 SGT. The first post was an automatic breach alert ([t.me/hazey_sg/2](https://t.me/hazey_sg/2)); see the activation record above.
 - **GitHub: private repository** at https://github.com/gabrieltang515/hazey, branch `main`. Reuse it; do not run the repository-creation helper again.
 
 ## Remaining steps
 
 No required steps remain. Optional:
 
-1. **Show `/pm25` in the bot's command menu.** `/pm25` works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu. It also rotates the webhook secret and redeploys current source, so run `sh scripts/hazey.sh test` first, and restore `wrangler.jsonc` formatting afterwards.
-2. **Map data refresh.** `public/map-data.js` uses URA Master Plan 2019; a 2025 edition exists (`d_4ce0038f7ac689652350bb91b7fb92ed`) with more Changi East land. Regenerate rather than hand-edit if the coastline should change.
+1. **Spot-check the first regular slot.** After this haze episode ends (highest regional PSI strictly below 200), confirm the next 02/06/10/14/18/22 SGT post and its `Channel broadcast sent (regular)` log line. Only the breach path has been observed in production so far.
+2. **Show `/pm25` in the bot's command menu.** `/pm25` works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu. It also rotates the webhook secret and redeploys current source, so run `sh scripts/hazey.sh test` first, and restore `wrangler.jsonc` formatting afterwards.
+3. **Map data refresh.** `public/map-data.js` uses URA Master Plan 2019; a 2025 edition exists (`d_4ce0038f7ac689652350bb91b7fb92ed`) with more Changi East land. Regenerate rather than hand-edit if the coastline should change.
 
 ## Existing Cloudflare resources
 
@@ -70,10 +64,12 @@ No required steps remain. Optional:
 | Assets binding | `ASSETS` |
 | Scheduled trigger | `*/5 * * * *` (every five minutes; cron is UTC) |
 | Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
-| Current deployment version | `5372661b-ac41-4f53-915f-724d2dec1b38` (redesign release, 14 Oct 2026 ~19:33 SGT) |
+| Telegram channel | `@hazey_sg` (`TELEGRAM_CHANNEL_ID` in `wrangler.jsonc` vars; the bot is a channel admin with Post Messages) |
+| D1 migrations applied (production) | `0001`–`0004` |
+| Current deployment version | `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release, 15 Oct 2026 07:09 SGT); previous `5372661b-ac41-4f53-915f-724d2dec1b38` (redesign) |
 | Worker secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEA_API_KEY` |
 
-Cloudflare sign-in was completed successfully through Wrangler OAuth. The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
+Cloudflare sign-in was completed successfully through Wrangler OAuth. On 15 October the Mac's Wrangler login had expired and was renewed with `npx wrangler login`; approve the browser page while that command is still waiting, because it times out after about two minutes (approving the Cloudflare dashboard alone does not log Wrangler in). The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
 
 The public account/database IDs in source are resource identifiers, not credentials. Credentials remain in Wrangler's local config and Git's configured credential helper; do not print or copy them into the repo.
 
@@ -91,6 +87,7 @@ The public account/database IDs in source are resource identifiers, not credenti
   - The Telegram panel stays hidden until a bot username and both Worker secrets are configured.
 - `public/map-data.js` is generated data: URA Master Plan 2019 land dissolved to one outline (main island, Jurong Island, Sentosa, Ubin, Tekong; causeways removed; simplified), equirectangular projection documented in its header, and Voronoi cells around NEA's `regionMetadata` label points. The Singapore Open Data Licence attribution is in the file header and the page footer.
 - `migrations/0001_init.sql` creates a singleton PSI snapshot, a refresh lease, and Telegram update records. `migrations/0002_pm25.sql` adds a separate singleton PM2.5 snapshot. Refresh leases are atomic. Older observations and older revisions of the same observation cannot overwrite newer data in either table.
+- `src/broadcast.js` posts to the Telegram channel from the scheduled refresh only (`refreshPsi(env, { broadcast: true })`); it decides breach/hourly/regular posts under a D1 lease in `channel_broadcasts` (`migrations/0004_channel_broadcasts.sql`). Requests and bot commands never broadcast.
 - `migrations/0003_history.sql` adds `reading_history (dataset, reading_at, source_updated_at, readings)`. Each successful snapshot save also upserts that hour (newer revisions only). The scheduled job backfills today and yesterday (Singapore dates) from `?date=` responses at minute 10 each hour, or every 15 minutes while fewer than 40 rows cover the window, skipping incomplete hours; rows older than ~50 hours are pruned.
 - One refresh fetches PSI and PM2.5 in parallel. Each saves independently: a PM2.5 failure is logged and never blocks or discards a PSI update, and saved PM2.5 survives later PM2.5 failures. The overdue-cache check uses the PSI snapshot age.
 - Snapshot refreshes run every five minutes, including while the page is closed. Browser checks run every minute. Requests also refresh an overdue cache; browser requests return saved data while refreshing, while bot commands can await the refresh.
@@ -138,6 +135,10 @@ Redesign release (19:30–19:50 SGT, 14 October 2026):
 - `0003_history.sql` applied to production before deploying version `5372661b-ac41-4f53-915f-724d2dec1b38`. Production serves every asset, fonts with year-long caching, other assets with `max-age=0, must-revalidate` plus ETags, and the existing CSP unchanged (all scripts, styles, and fonts are same-origin).
 - Production `/api/history` was empty after deploy (19:35) and the 19:45 scheduled run backfilled 25 hourly points per dataset (7 pm 13 Oct to 7 pm 14 Oct SGT). The browser check then passed against production at desktop and mobile widths (five trend charts, 25 table rows, map, switch, dark theme, Telegram panel); the production screenshot was inspected.
 
+Channel release (07:00–07:20 SGT, 15 October 2026):
+
+- 40/40 Node tests, dry run, `0004_channel_broadcasts.sql` applied to production before deploying version `374e97dd-c9a6-4bd3-86ea-8013dde66e78`, a real breach alert in `@hazey_sg` with the matching `Channel broadcast sent (breach)` log line, persisted D1 episode state, and no duplicate on the next cron. Details are in the activation record at the top.
+
 ## Development and deployment commands
 
 On a usual Node/npm installation:
@@ -150,11 +151,11 @@ npm run dev
 npm run deploy
 ```
 
-On the current Mac, `node` and `npm` are not in the default shell PATH. Cursor supplies Node at:
+On the current Mac, Node 22.15 and npm are now on PATH (installed through Herd's nvm), so the `npm`/`npx` commands above work directly; they were used for the 15 October channel release. If `node` is ever missing, Cursor supplies Node at:
 
 `/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node`
 
-The checked-in wrapper locates that fallback automatically:
+The checked-in wrapper uses `node` from PATH and falls back to Cursor's automatically:
 
 ```sh
 sh scripts/hazey.sh test
@@ -170,7 +171,7 @@ Wrangler is installed locally and pinned by `package-lock.json` (version 4.151.0
 
 Browser verification uses installed Chrome and Node's native DevTools/WebSocket support, with no browser test dependency. Set `CHROME_BIN` for non-macOS installations. Screenshots are saved in the system temporary directory, not the repository. The browser profile is temporary and removed after checks.
 
-The local development DB is disposable and separate from production. Production is initialized with both migrations; do not drop or recreate its database. Apply any new migration to production **before** deploying code that queries it.
+The local development DB is disposable and separate from production. Production has migrations 0001–0004 applied; do not drop or recreate its database. Apply any new migration to production **before** deploying code that queries it.
 
 To run the scheduled handler locally at a chosen time (for example minute 10, which backfills history), start dev with `--test-scheduled` and POST `{"cron":"*/5 * * * *","scheduled_time":<epoch ms>}` to `/cdn-cgi/local/explorer/api/local/scheduled?worker=hazey`. The `/__scheduled?time=` query is ignored by this Wrangler version.
 
