@@ -1,0 +1,17 @@
+{
+  "name": "hazey",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "node --test",
+    "check:browser": "node scripts/check-browser.js",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 migrations apply PSI_DB --local",
+    "db:remote": "wrangler d1 migrations apply PSI_DB --remote",
+    "telegram:setup": "node scripts/setup-telegram.js"
+  },
+  "devDependencies": { "wrangler": "^4.0.0" },
+  "engines": { "node": ">=22.13.0" }
+}

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en-SG">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173d32">
+  <meta name="description" content="The latest NEA 24-hour PSI readings for Singapore’s north, south, east, west, and central regions.">
+  <title>Hazey · Singapore PSI</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#readings">Skip to readings</a>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Hazey home"><svg viewBox="0 0 36 30" aria-hidden="true"><path d="M6 16h24M3 23h24M10 9h23" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>hazey<span class="brand-dot">.</span></a>
+      <span class="location"><span class="location-dot"></span> Singapore <span class="timezone">/ SGT</span></span>
+      <a class="source-link" href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view" target="_blank" rel="noopener noreferrer">NEA data <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">A little clarity, whatever the weather</p>
+          <h1 id="page-title">Keep an eye<br>on the air.</h1>
+          <p class="intro-copy">The latest PSI readings across Singapore.<br> Five regions. One clear view.</p>
+        </div>
+        <div class="summary" id="summary" data-category="unknown">
+          <div class="summary-top"><span>Highest regional PSI</span><span class="summary-icon" aria-hidden="true">↗</span></div>
+          <div class="summary-number"><span id="highest-value">—</span><span class="summary-unit">24-hour PSI</span></div>
+          <div class="summary-bottom"><span class="category-badge" id="highest-category">Waiting for readings</span><span id="highest-region">Across Singapore</span></div>
+        </div>
+      </section>
+
+      <div class="notice" id="notice" role="status" hidden></div>
+      <section class="readings-section" id="readings" aria-labelledby="readings-title" aria-busy="true">
+        <div class="section-heading">
+          <div><p class="eyebrow">Your neighbourhood, at a glance</p><h2 id="readings-title">Around the island</h2></div>
+          <button class="refresh-button" id="refresh-button" type="button"><span class="refresh-icon" aria-hidden="true">↻</span><span id="refresh-label">Refresh readings</span></button>
+        </div>
+        <div class="reading-meta"><span class="feed-state" id="feed-state"><span class="feed-dot"></span><span id="feed-label">Connecting to NEA readings</span></span><span id="reading-time">Reading time: —</span></div>
+        <div class="region-grid" id="region-grid"></div>
+        <div class="update-meta"><span id="source-updated">NEA update: —</span><span>Checks for updates every minute</span></div>
+      </section>
+
+      <section class="scale-panel" aria-labelledby="scale-title">
+        <div class="scale-heading"><div><p class="eyebrow">Know your number</p><h2 id="scale-title">The PSI scale</h2></div><p>PSI is an index, not a concentration.<br>These are the 24-hour PSI bands.</p></div>
+        <div class="scale-grid">
+          <div data-category="good"><span class="scale-bar"></span><strong>0–50</strong><span>Good</span></div>
+          <div data-category="moderate"><span class="scale-bar"></span><strong>51–100</strong><span>Moderate</span></div>
+          <div data-category="unhealthy"><span class="scale-bar"></span><strong>101–200</strong><span>Unhealthy</span></div>
+          <div data-category="very-unhealthy"><span class="scale-bar"></span><strong>201–300</strong><span>Very unhealthy</span></div>
+          <div data-category="hazardous"><span class="scale-bar"></span><strong>Above 300</strong><span>Hazardous</span></div>
+        </div>
+        <a class="text-link" href="https://www.nea.gov.sg/our-services/pollution-control/air-pollution/air-quality" target="_blank" rel="noopener noreferrer">Read NEA’s air quality guidance <span aria-hidden="true">↗</span></a>
+      </section>
+
+      <section class="telegram-panel" id="telegram-panel" aria-labelledby="telegram-title" hidden>
+        <div class="telegram-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m21 3-3.4 17-5.3-4-2.8 2.7.6-4.4L19 5.9l-11 7-5-1.6L21 3Z" fill="currentColor"/></svg></div>
+        <div class="telegram-copy"><p class="eyebrow">A quick check, wherever you are</p><h2 id="telegram-title">The same readings. In Telegram.</h2><p>Send <code>/psi</code> for all regions, or <code>/psi west</code> for one.</p></div>
+        <button class="telegram-action" id="telegram-copy" type="button">Copy /psi <span aria-hidden="true">↗</span></button>
+        <a class="telegram-action" id="telegram-link" hidden target="_blank" rel="noopener noreferrer">Open the bot <span aria-hidden="true">↗</span></a>
+        <span class="sr-only" id="copy-status" role="status"></span>
+      </section>
+    </main>
+
+    <footer><span>hazey. <span class="footer-note">A clearer view of Singapore’s air.</span></span><span>Data from NEA via <a href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view" target="_blank" rel="noopener noreferrer">data.gov.sg ↗</a></span></footer>
+  </div>
+  <noscript><p class="noscript">Enable JavaScript to load live readings, or view the <a href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view">NEA dataset</a>.</p></noscript>
+</body>
+</html>
