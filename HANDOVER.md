@@ -1,21 +1,23 @@
 # Hazey handover
 
-Updated: 14 October 2026, about 18:15 Singapore time.
+Updated: 14 October 2026, about 19:50 Singapore time.
 
 ## Requested outcome and current status
 
-The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot showing the latest regional Singapore PSI from NEA/data.gov.sg, using Cloudflare Free storage, plus a private GitHub repository with this handover. On 14 October 2026 they also asked for PM2.5 levels.
+The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot showing the latest regional Singapore PSI from NEA/data.gov.sg, using Cloudflare Free storage, plus a private GitHub repository with this handover. On 14 October 2026 they also asked for PM2.5 levels and then a sleeker frontend (buildless, shadcn-style, with 24-hour trend charts, dark mode, a region map, and live relative times), which they approved from screenshots before it was deployed.
 
-- **Web app: deployed and working** at https://hazey.gabrieltang515.workers.dev, now with 24-hour PSI **and** NEA 1-hour PM2.5 for all five regions.
-- **Storage: provisioned and initialized** in Cloudflare D1. Migrations `0001_init.sql` and `0002_pm25.sql` are applied to production and local.
-- **Telegram bot: activated as [@hazey_sg_bot](https://t.me/hazey_sg_bot).** The owner created it in BotFather and ran the hidden-prompt setup helper, which installed `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, registered the webhook, set the command menu, and redeployed. Production logs show four real Telegram updates at 17:59–18:00 SGT, each answered `200`; the Worker returns `200` only after Telegram's `sendMessage` succeeds. The owner had not yet described the reply text at the time of writing.
+- **Web app: redesigned, deployed and working** at https://hazey.gabrieltang515.workers.dev, with 24-hour PSI **and** NEA 1-hour PM2.5 for all five regions, a banded region map, 24-hour trends, and light/dark themes.
+- **Storage: provisioned and initialized** in Cloudflare D1. Migrations `0001_init.sql`, `0002_pm25.sql`, and `0003_history.sql` are applied to production and local.
+- **NEA API key: installed** by the owner as the Worker secret `NEA_API_KEY` at ~18:15 SGT. Before it, the 18:00 scheduled refresh got HTTP `429`; afterwards every observed five-minute refresh (18:20, 18:35, 18:40, 18:45, 18:50) saved on schedule.
+- **Telegram bot: activated as [@hazey_sg_bot](https://t.me/hazey_sg_bot).** The owner created it in BotFather and ran the hidden-prompt setup helper, which installed `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, registered the webhook, set the command menu, and redeployed. Production logs show four real Telegram updates at 17:59–18:00 SGT, each answered `200`; the Worker returns `200` only after Telegram's `sendMessage` succeeds. The owner then confirmed the replies looked right.
 - **GitHub: private repository** at https://github.com/gabrieltang515/hazey, branch `main`. Reuse it; do not run the repository-creation helper again.
 
 ## Remaining steps
 
-1. **Add a data.gov.sg API key (owner action, recommended).** The 18:00 SGT scheduled refresh on 14 October was rejected by NEA with HTTP `429` (rate limited). Unauthenticated requests from Cloudflare's shared egress are throttled; saved readings were preserved and the next refresh succeeded, but refreshes can be skipped. Each refresh now makes two NEA calls (PSI and PM2.5). The owner should create a free API key on data.gov.sg, then in a terminal in this repo run `sh scripts/hazey.sh secret put NEA_API_KEY` and paste it at Wrangler's hidden prompt. The Worker already sends it as `x-api-key`, matching the spec. Never paste it into chat.
-2. **Optional: show `/pm25` in the bot's command menu.** `/pm25` already works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu (it also rotates the webhook secret and redeploys current source; run `sh scripts/hazey.sh test` first).
-3. Ask the owner to confirm the bot's reply text for `/psi`, `/psi west`, and `/pm25` matches `/api/psi`.
+No required steps remain. Optional:
+
+1. **Show `/pm25` in the bot's command menu.** `/pm25` works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu. It also rotates the webhook secret and redeploys current source, so run `sh scripts/hazey.sh test` first, and restore `wrangler.jsonc` formatting afterwards.
+2. **Map data refresh.** `public/map-data.js` uses URA Master Plan 2019; a 2025 edition exists (`d_4ce0038f7ac689652350bb91b7fb92ed`) with more Changi East land. Regenerate rather than hand-edit if the coastline should change.
 
 ## Existing Cloudflare resources
 
@@ -31,7 +33,8 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 | Assets binding | `ASSETS` |
 | Scheduled trigger | `*/5 * * * *` (every five minutes; cron is UTC) |
 | Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
-| Current deployment version | `04dec9dd-9485-4b07-9655-5809c7806b5e` (PM2.5 release, 14 Oct 2026 ~18:07 SGT) |
+| Current deployment version | `5372661b-ac41-4f53-915f-724d2dec1b38` (redesign release, 14 Oct 2026 ~19:33 SGT) |
+| Worker secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEA_API_KEY` |
 
 Cloudflare sign-in was completed successfully through Wrangler OAuth. The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
 
@@ -39,11 +42,19 @@ The public account/database IDs in source are resource identifiers, not credenti
 
 ## Architecture and important behavior
 
-- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
+- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), `/api/history` (`{ psi: [...], pm25: [...] }`, each item `{ at, north, south, east, west, central }`, ascending, last 25 hours), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
 - `src/psi.js` validates and normalizes both NEA responses. PSI requires valid 24-hour PSI values for all five regions and tolerates missing optional 24-hour pollutant fields. PM2.5 requires a non-negative `pm25_one_hourly` concentration for all five regions. Both choose the most recent observation.
 - `public/psi.js` shares PSI category boundaries, NEA 1-hour PM2.5 bands (I Normal 0–55, II Elevated 56–150, III High 151–250, IV Very high ≥251), and SGT formatting between the browser and bot.
-- `public/index.html`, `public/styles.css`, and `public/app.js` implement the responsive dashboard: 24-hour PSI and category, a 1-hour PM2.5 row with its band on each region card, separate PSI and PM2.5 reading times, optional 24-hour PM2.5/PM10 details, PSI and PM2.5 band legends, refresh, and delayed-data states for each dataset. The Telegram panel stays hidden until a bot username and both Worker secrets are configured.
+- `public/index.html`, `public/styles.css`, and `public/app.js` implement the buildless dashboard (no framework; shadcn-style design language by hand):
+  - Hero: headline, plain-language verdict (e.g. "Unhealthy across Singapore"), a PSI / 1-hour PM2.5 radio switch (saved in `localStorage`), and an SVG map built from `public/map-data.js`. Regions are tinted by the selected metric's band, labelled with values, keyboard-focusable, and jump to their card. The legend under the map lists the selected metric's bands with ranges.
+  - Region cards: the selected metric as the big number with its band badge, "Up/Down N in 24 hours", a 24-hour trend line on a scale shared by all five regions (pointer and arrow-key readouts), the other metric with its badge, and 24-hour PM2.5/PM10 averages. A table view lists the same hourly data. Phones use a compact card with the trend beside the number.
+  - Masthead: live status pill ("6:00 pm reading, checked N min ago"; "New" cue when NEA publishes; delayed/offline states) and a light/dark toggle. `public/theme.js` applies a saved theme before first paint; otherwise the system setting applies.
+  - Tokens are defined once for light and redefined for dark; text and band colours were contrast-checked (text ≥ 5:1, band marks ≥ 5:1 on cards in both themes). One orchestrated motion moment (map regions tint in on first load); `prefers-reduced-motion` disables motion.
+  - Fonts: Newsreader (display, optical-size axis) and Public Sans (UI and data), latin subsets, self-hosted with OFL licence files in `public/fonts`, cached for a year.
+  - The Telegram panel stays hidden until a bot username and both Worker secrets are configured.
+- `public/map-data.js` is generated data: URA Master Plan 2019 land dissolved to one outline (main island, Jurong Island, Sentosa, Ubin, Tekong; causeways removed; simplified), equirectangular projection documented in its header, and Voronoi cells around NEA's `regionMetadata` label points. The Singapore Open Data Licence attribution is in the file header and the page footer.
 - `migrations/0001_init.sql` creates a singleton PSI snapshot, a refresh lease, and Telegram update records. `migrations/0002_pm25.sql` adds a separate singleton PM2.5 snapshot. Refresh leases are atomic. Older observations and older revisions of the same observation cannot overwrite newer data in either table.
+- `migrations/0003_history.sql` adds `reading_history (dataset, reading_at, source_updated_at, readings)`. Each successful snapshot save also upserts that hour (newer revisions only). The scheduled job backfills today and yesterday (Singapore dates) from `?date=` responses at minute 10 each hour, or every 15 minutes while fewer than 40 rows cover the window, skipping incomplete hours; rows older than ~50 hours are pruned.
 - One refresh fetches PSI and PM2.5 in parallel. Each saves independently: a PM2.5 failure is logged and never blocks or discards a PSI update, and saved PM2.5 survives later PM2.5 failures. The overdue-cache check uses the PSI snapshot age.
 - Snapshot refreshes run every five minutes, including while the page is closed. Browser checks run every minute. Requests also refresh an overdue cache; browser requests return saved data while refreshing, while bot commands can await the refresh.
 - Data is marked stale when the saved fetch is more than 15 minutes old or the observation is more than two hours old. Those are application freshness thresholds, not promises about NEA publication frequency.
@@ -82,6 +93,14 @@ Telegram activation and PM2.5 release (17:55–18:15 SGT, 14 October 2026):
 - `0002_pm25.sql` applied to local and production D1; version `04dec9dd-9485-4b07-9655-5809c7806b5e` deployed.
 - Browser check (now also asserting five PM2.5 values and the PM2.5 SGT time) passed locally and against production at desktop and mobile widths; screenshots inspected.
 
+Redesign release (19:30–19:50 SGT, 14 October 2026):
+
+- **26 Node tests pass**, adding history append and `/api/history` shape, backfill of today/yesterday with skipped incomplete hours and window filtering, newer-revision protection, scheduled hourly backfill and pruning, and `historyPoints` parsing.
+- Local `wrangler dev` with a dispatched scheduled run backfilled 25 real hourly points per dataset from NEA.
+- The browser check (now asserting the banded map, PSI/PM2.5 switch, five trend charts with table rows, and the dark theme) passed locally at desktop and mobile widths; light, dark, PSI, and PM2.5 screenshots were inspected and revised (logo spacing, label wrapping, chart clutter, map transition timing, compact phone cards) before the owner approved them.
+- `0003_history.sql` applied to production before deploying version `5372661b-ac41-4f53-915f-724d2dec1b38`. Production serves every asset, fonts with year-long caching, other assets with `max-age=0, must-revalidate` plus ETags, and the existing CSP unchanged (all scripts, styles, and fonts are same-origin).
+- Production `/api/history` was empty after deploy (19:35) and the 19:45 scheduled run backfilled 25 hourly points per dataset (7 pm 13 Oct to 7 pm 14 Oct SGT). The browser check then passed against production at desktop and mobile widths (five trend charts, 25 table rows, map, switch, dark theme, Telegram panel); the production screenshot was inspected.
+
 ## Development and deployment commands
 
 On a usual Node/npm installation:
@@ -104,7 +123,7 @@ The checked-in wrapper locates that fallback automatically:
 sh scripts/hazey.sh test
 sh scripts/hazey.sh d1 migrations apply PSI_DB --local
 sh scripts/hazey.sh d1 migrations apply PSI_DB --remote   # apply before deploying code that needs a new table
-sh scripts/hazey.sh dev
+sh scripts/hazey.sh dev                      # add --test-scheduled to trigger the cron locally
 sh scripts/hazey.sh deploy --dry-run
 sh scripts/hazey.sh deploy
 sh scripts/hazey.sh browser https://hazey.gabrieltang515.workers.dev
@@ -116,7 +135,11 @@ Browser verification uses installed Chrome and Node's native DevTools/WebSocket 
 
 The local development DB is disposable and separate from production. Production is initialized with both migrations; do not drop or recreate its database. Apply any new migration to production **before** deploying code that queries it.
 
+To run the scheduled handler locally at a chosen time (for example minute 10, which backfills history), start dev with `--test-scheduled` and POST `{"cron":"*/5 * * * *","scheduled_time":<epoch ms>}` to `/cdn-cgi/local/explorer/api/local/scheduled?worker=hazey`. The `/__scheduled?time=` query is ignored by this Wrangler version.
+
 The Telegram setup helper rewrites `wrangler.jsonc` with `JSON.stringify` formatting; after rerunning it, restore the original formatting so the diff shows only intended changes.
+
+Claude Code: Anthropic's `frontend-design` plugin is enabled at project scope in `.claude/settings.json` (installed with `claude plugin install frontend-design@claude-plugins-official --scope project`). The redesign followed it and the data-visualisation rules (shared scales, neutral trend lines, status colours paired with labels, table view, contrast checks).
 
 Git remote: `https://github.com/gabrieltang515/hazey.git`, branch `main`, visibility **private**. The saved GitHub credential was verified as `gabrieltang515`. Local commit identity uses Gabriel Tang's GitHub noreply address. Do not read credential-helper output into logs. Ignore `node_modules`, `.wrangler`, `.dev.vars`, and `.env`.
 

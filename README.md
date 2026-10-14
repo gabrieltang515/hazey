@@ -1,6 +1,6 @@
 # Hazey
 
-A responsive Singapore PSI and PM2.5 dashboard and Telegram bot hosted together on a Cloudflare Worker. NEA data comes from two data.gov.sg real-time APIs:
+A responsive Singapore PSI and PM2.5 dashboard (region map, 24-hour trends, light and dark themes) and Telegram bot hosted together on a Cloudflare Worker. NEA data comes from two data.gov.sg real-time APIs:
 
 - `https://api-open.data.gov.sg/v2/real-time/api/psi`, described in the downloaded `PollutantStandardsIndexPSI.json` spec
 - `https://api-open.data.gov.sg/v2/real-time/api/pm25`, NEA’s 1-hour PM2.5 readings
@@ -17,8 +17,10 @@ PM2.5 is shown separately as a **1-hour concentration in µg/m³** (`pm25_one_ho
 
 ## What is included
 
-- Responsive dashboard with 24-hour PSI categories, 1-hour PM2.5 bands on every region, optional 24-hour PM2.5 and PM10 details, manual refresh, and automatic checks every minute.
-- Cloudflare D1 stores one latest PSI snapshot and one latest PM2.5 snapshot. A five minute scheduled Worker job refreshes both; requests also refresh an overdue cache.
+- Responsive, buildless dashboard: a map of the five NEA regions tinted by band, a 24-hour PSI / 1-hour PM2.5 switch, a plain-language summary, region cards with a 24-hour trend line (hover and keyboard readouts, plus a table view), optional 24-hour PM2.5 and PM10 details, a live status pill, manual refresh, and automatic checks every minute.
+- Light and dark themes follow the device setting, with a saved toggle. Fonts (Newsreader, Public Sans; SIL OFL) are self-hosted in `public/fonts`.
+- `GET /api/history` serves the last 25 hourly readings per dataset from D1. Each refresh appends the latest hour, and the scheduled job backfills gaps from NEA's date-filtered responses (hourly, or every 15 minutes while the window is incomplete).
+- Cloudflare D1 stores one latest PSI snapshot, one latest PM2.5 snapshot, and about two days of hourly history. A five minute scheduled Worker job refreshes both snapshots; requests also refresh an overdue cache.
 - Atomic database leases prevent concurrent source refreshes. An older reading cannot replace a newer observation.
 - Saved readings remain available during NEA outages, with an explicit delayed-data label. Cold-start failures display an error instead of sample values.
 - Telegram `/start`, `/help`, `/psi` and `/psi west` (24-hour PSI only), and `/pm25` and `/pm25 west` (1-hour PM2.5 only) commands. The webhook requires Telegram’s secret header and records handled update IDs for retry deduplication.
@@ -94,10 +96,12 @@ npm test
 npx wrangler deploy --dry-run
 ```
 
-With Chrome installed, `npm run check:browser -- https://hazey.gabrieltang515.workers.dev` checks the live page at desktop and mobile widths, including five populated cards with PSI and 1-hour PM2.5, SGT times, horizontal overflow, details, and refresh. Screenshots are written to the system temporary directory. Set `CHROME_BIN` on systems where Chrome is not at its default macOS path.
+With Chrome installed, `npm run check:browser -- https://hazey.gabrieltang515.workers.dev` checks the live page at desktop and mobile widths, including five populated cards with PSI and 1-hour PM2.5, the banded map, the PSI/PM2.5 switch, trend charts, the dark theme, SGT times, horizontal overflow, details, and refresh. Screenshots are written to the system temporary directory. Set `CHROME_BIN` on systems where Chrome is not at its default macOS path.
 
 The tests cover PSI category and PM2.5 band boundaries, API validation for both datasets, PM2.5 failures that must not block PSI, missing optional fields, SGT formatting, stale readings, real SQL cache writes and leases, snapshot ordering, webhook authentication, command routing, duplicate updates, failed replies, and HTTP methods. Tests use Node’s built-in SQLite against the actual migrations, plus mocked external APIs. The live Cloudflare deployment and Telegram webhook delivery have been verified; see [HANDOVER.md](HANDOVER.md).
 
 ## Source
 
-[NEA PSI dataset on data.gov.sg](https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view). The supplied OpenAPI spec is retained in `docs/PollutantStandardsIndexPSI.json`. PM2.5 uses NEA’s real-time endpoint `https://api-open.data.gov.sg/v2/real-time/api/pm25`; its live response was checked and has `data.items[].readings.pm25_one_hourly` for all five regions.
+[NEA PSI dataset on data.gov.sg](https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view). The supplied OpenAPI spec is retained in `docs/PollutantStandardsIndexPSI.json`. PM2.5 uses NEA’s real-time endpoint `https://api-open.data.gov.sg/v2/real-time/api/pm25`; its live response was checked and has `data.items[].readings.pm25_one_hourly` for all five regions. Adding `?date=YYYY-MM-DD` to either endpoint returns that Singapore day's hourly items, which the history backfill uses.
+
+The map land outline in `public/map-data.js` contains information from [URA Master Plan 2019 Region Boundary (No Sea)](https://data.gov.sg/datasets/d_bf4d24df9129d5a8ff8cf82e20959ee0/view), accessed 14 October 2026 from data.gov.sg under the [Singapore Open Data Licence v1.0](https://data.gov.sg/open-data-licence). Region boundaries on the map are approximate Voronoi cells around NEA's published regional reference points; NEA does not publish region polygons. The page footer carries the required attribution.
