@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
+import { broadcastChannel } from "../src/broadcast.js";
 
 function fixture(timestamp = new Date().toISOString()) {
   return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
@@ -65,7 +66,8 @@ test("cold API fetch stores real PSI data and an older result cannot replace it"
 });
 test("failed upstream fetch preserves saved readings and releases the refresh lease", async t => {
   const { db, env, ctx, pending } = setup(t);
-  const snapshot = normalizePsi(fixture(), Date.now() - 20 * 60_000);
+  const fetchedAt = Date.now() - 20 * 60_000;
+  const snapshot = normalizePsi(fixture(new Date(fetchedAt).toISOString()), fetchedAt);
   db.prepare("INSERT INTO psi_snapshot VALUES (1, ?, ?, ?, ?)").run(JSON.stringify(snapshot), Date.parse(snapshot.fetchedAt), Date.parse(snapshot.readingAt), Date.parse(snapshot.sourceUpdatedAt));
   t.mock.method(globalThis, "fetch", async () => new Response("upstream error", { status: 503 }));
   const response = await worker.fetch(new Request("https://hazey.example/api/psi"), env, ctx);
@@ -250,4 +252,219 @@ test("scheduled runs backfill hourly and prune history older than two windows", 
   await Promise.all(pending);
   assert.equal(urls.filter(url => url.includes("?date=")).length, 4);
   assert.equal(db.prepare("SELECT count(*) AS n FROM reading_history WHERE reading_at < ?").get(scheduledTime - 2 * 24 * 60 * 60_000).n, 0);
+});
+
+// Real SQL and the scheduled Worker are exercised; only upstream services and time are replaced.
+function channelHarness(t) {
+  const { env, db } = setup(t);
+  env.TELEGRAM_CHANNEL_ID = "@hazey_sg";
+  env.PUBLIC_APP_URL = "https://hazey.example";
+  let now, maximum, options;
+  const messages = [];
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(API_URL)) {
+      if (options.psiDown) return new Response("unavailable", { status: 503 });
+      const body = fixture(options.readingAt ?? new Date(now).toISOString());
+      body.data.items[0].updatedTimestamp = options.updatedAt ?? new Date(now).toISOString();
+      body.data.items[0].readings.psi_twenty_four_hourly = options.values ?? { north: 120, south: 130, east: 140, west: maximum, central: 150 };
+      return Response.json(body);
+    }
+    if (url.startsWith(PM25_API_URL)) {
+      if (options.pm25Down) return new Response("unavailable", { status: 503 });
+      return Response.json(pm25Fixture(options.pm25At ?? new Date(now).toISOString()));
+    }
+    assert.ok(url.endsWith("/sendMessage"));
+    if (options.telegramDown) return Response.json({ ok: false }, { status: 429 });
+    if (options.delivery) await options.delivery;
+    messages.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: { message_id: messages.length } });
+  });
+  return { db, env, messages, async tick(time, psi = 150, settings = {}) {
+    now = Date.parse(time); maximum = psi; options = settings;
+    const pending = [];
+    await worker.scheduled({ scheduledTime: now }, env, { waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  } };
+}
+
+test("channel regular reports follow 6am-anchored four-hour SGT slots, including 2am, once per slot", async t => {
+  const { tick, messages } = channelHarness(t);
+  for (const time of ["2026-10-14T05:55:00+08:00", "2026-10-14T06:00:00+08:00", "2026-10-14T06:05:00+08:00",
+    "2026-10-14T07:00:00+08:00", "2026-10-14T10:00:00+08:00", "2026-10-14T14:00:00+08:00",
+    "2026-10-14T18:00:00+08:00", "2026-10-14T22:00:00+08:00", "2026-10-15T00:00:00+08:00", "2026-10-15T02:00:00+08:00"]) await tick(time);
+  assert.equal(messages.length, 6);
+  assert.ok(messages.every(message => message.chat_id === "@hazey_sg"));
+  assert.match(messages[0].text, /Overall Singapore.*120–150/);
+  assert.match(messages[0].text, /North: PSI 120.*PM2.5 55/);
+  assert.match(messages[0].text, /Central: PSI 150.*PM2.5 151/);
+  assert.match(messages[0].text, /1-hour PM2.5.*µg\/m³/);
+  assert.match(messages[0].text, /https:\/\/hazey.example/);
+});
+
+test("breach alerts immediately, then hourly, holds at 200, clears silently and resumes the fixed schedule", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:15:00+08:00", 200);
+  assert.equal(messages.length, 0, "200 alone does not enter alert mode");
+  await tick("2026-10-14T15:20:00+08:00", 201);
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].text, /PSI alert/);
+  await tick("2026-10-14T15:25:00+08:00", 205);
+  assert.equal(messages.length, 1);
+  await tick("2026-10-14T16:00:00+08:00", 205);
+  await tick("2026-10-14T17:00:00+08:00", 200);
+  await tick("2026-10-14T17:20:00+08:00", 199);
+  assert.equal(messages.length, 3, "no recovery post");
+  await tick("2026-10-14T18:00:00+08:00", 199);
+  assert.equal(messages.length, 4);
+  await tick("2026-10-14T18:20:00+08:00", 220);
+  assert.equal(messages.length, 5, "a new episode gets an immediate alert even in an already reported hour");
+  await tick("2026-10-14T22:00:00+08:00", 220);
+  await tick("2026-10-14T22:05:00+08:00", 220);
+  assert.equal(messages.length, 6, "hourly and regular slot produce one post");
+});
+
+test("hourly channel report waits for the current NEA observation and sends when it arrives", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:20:00+08:00", 220);
+  await tick("2026-10-14T16:00:00+08:00", 220, { readingAt: "2026-10-14T15:00:00+08:00" });
+  assert.equal(messages.length, 1);
+  await tick("2026-10-14T16:05:00+08:00", 225, { readingAt: "2026-10-14T16:00:00+08:00" });
+  assert.equal(messages.length, 2);
+  await tick("2026-10-14T16:10:00+08:00", 225);
+  assert.equal(messages.length, 2);
+});
+
+test("failed channel deliveries retry on the next check without losing the immediate breach or scheduled slot", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:20:00+08:00", 220, { telegramDown: true });
+  await tick("2026-10-14T15:25:00+08:00", 220);
+  assert.equal(messages.length, 1);
+  await tick("2026-10-14T16:00:00+08:00", 220, { telegramDown: true });
+  await tick("2026-10-14T16:05:00+08:00", 220);
+  await tick("2026-10-14T16:10:00+08:00", 220);
+  assert.equal(messages.length, 2);
+});
+
+test("channel suppresses stale or future PSI and does not clear alert mode during a source outage", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:20:00+08:00", 220, { readingAt: "2026-10-14T12:00:00+08:00" });
+  assert.equal(messages.length, 0);
+  await tick("2026-10-14T15:25:00+08:00", 220);
+  assert.equal(messages.length, 1);
+  await tick("2026-10-14T16:00:00+08:00", 100, { psiDown: true });
+  assert.equal(messages.length, 1);
+  await tick("2026-10-14T16:05:00+08:00", 220);
+  assert.equal(messages.length, 2);
+  await tick("2026-10-14T17:00:00+08:00", 220, { readingAt: "2026-10-14T18:00:00+08:00" });
+  assert.equal(messages.length, 2);
+  await tick("2026-10-14T17:05:00+08:00", 220, { readingAt: "2026-10-14T17:00:00+08:00" });
+  assert.equal(messages.length, 3, "a future response must not prevent later valid readings");
+});
+
+test("channel uses separate PM2.5 times and still sends PSI when PM2.5 is missing or delayed", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T06:00:00+08:00", 150, { pm25Down: true });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].text, /PM2.5 unavailable/);
+  await tick("2026-10-14T10:00:00+08:00", 150, { pm25At: "2026-10-14T07:00:00+08:00" });
+  assert.equal(messages.length, 2);
+  assert.match(messages[1].text, /PM2.5.*delayed/i);
+  assert.match(messages[1].text, /7:00 am/);
+});
+
+test("future PM2.5 cannot replace the saved snapshot or block subsequent valid PM2.5", async t => {
+  const { tick, db } = channelHarness(t);
+  await tick("2026-10-14T10:00:00+08:00", 150);
+  await tick("2026-10-14T10:05:00+08:00", 150, { pm25At: "2026-10-14T11:00:00+08:00" });
+  assert.equal(JSON.parse(db.prepare("SELECT payload FROM pm25_snapshot").get().payload).readingAt, "2026-10-14T02:00:00.000Z");
+  await tick("2026-10-14T10:10:00+08:00", 150);
+  assert.equal(JSON.parse(db.prepare("SELECT payload FROM pm25_snapshot").get().payload).readingAt, "2026-10-14T02:10:00.000Z");
+});
+
+test("channel advice escalates at the official PSI boundaries and never substitutes PM2.5 for PSI", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T06:00:00+08:00", 200);
+  assert.match(messages[0].text, /Healthy.*reduce/i);
+  await tick("2026-10-14T06:20:00+08:00", 201);
+  assert.match(messages[1].text, /Healthy.*avoid/i);
+  assert.match(messages[1].text, /chronic.*avoid outdoor/i);
+  await tick("2026-10-14T07:00:00+08:00", 301);
+  assert.match(messages[2].text, /Healthy.*minimise outdoor/i);
+  assert.match(messages[2].text, /MOH/);
+});
+
+test("concurrent scheduled invocations cannot both post to the channel", async t => {
+  const { tick, messages } = channelHarness(t);
+  let release;
+  const delivery = new Promise(resolve => { release = resolve; });
+  const first = tick("2026-10-14T06:00:00+08:00", 150, { delivery });
+  // Let the first invocation enter its network send while the second claims the same slot.
+  await new Promise(resolve => setImmediate(resolve));
+  const second = tick("2026-10-14T06:00:00+08:00", 150, { delivery });
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  await Promise.all([first, second]);
+  assert.equal(messages.length, 1);
+});
+
+test("a failed first alert still starts an episode that holds at 200 until recovery", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:20:00+08:00", 201, { telegramDown: true });
+  await tick("2026-10-14T15:25:00+08:00", 200);
+  assert.equal(messages.length, 1, "retry the first alert even at 200");
+  await tick("2026-10-14T16:00:00+08:00", 200);
+  assert.equal(messages.length, 2);
+});
+
+test("recovery clears alert mode even when the coincident regular report fails", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T17:20:00+08:00", 220);
+  await tick("2026-10-14T18:00:00+08:00", 199, { telegramDown: true });
+  await tick("2026-10-14T19:00:00+08:00", 200);
+  assert.equal(messages.length, 1, "200 after recovery must not re-enter hourly mode");
+  await tick("2026-10-14T22:00:00+08:00", 200);
+  assert.equal(messages.length, 2);
+});
+
+test("a stale source response cannot broadcast a retained fresh cache from a browser refresh", async t => {
+  const { tick, env, messages } = channelHarness(t);
+  delete env.TELEGRAM_CHANNEL_ID;
+  await tick("2026-10-14T15:55:00+08:00", 220);
+  env.TELEGRAM_CHANNEL_ID = "@hazey_sg";
+  await tick("2026-10-14T16:00:00+08:00", 150, { readingAt: "2026-10-14T13:00:00+08:00" });
+  assert.equal(messages.length, 0);
+  await tick("2026-10-14T16:05:00+08:00", 220);
+  assert.equal(messages.length, 1);
+});
+
+test("older observations and older revisions cannot restart an episode after a newer recovery", async t => {
+  const { tick, env, db, messages } = channelHarness(t);
+  const at = "2026-10-14T15:00:00+08:00";
+  await tick("2026-10-14T15:20:00+08:00", 220, { readingAt: at });
+  const older = JSON.parse(db.prepare("SELECT payload FROM psi_snapshot").get().payload);
+  await tick("2026-10-14T15:25:00+08:00", 199, { readingAt: at });
+  await broadcastChannel(env, older, Date.parse("2026-10-14T15:30:00+08:00"));
+  assert.equal(messages.length, 1, "must re-read the newer authoritative snapshot after claiming the lease");
+  // Even if supplied with an older authoritative snapshot, the channel's processed revision guards its mode.
+  db.prepare("UPDATE psi_snapshot SET payload = ?").run(JSON.stringify(older));
+  await broadcastChannel(env, older, Date.parse("2026-10-14T15:35:00+08:00"));
+  assert.equal(messages.length, 1, "processed revision cannot move backwards");
+  const earlier = { ...older, readingAt: "2026-10-14T14:00:00+08:00" };
+  db.prepare("UPDATE psi_snapshot SET payload = ?").run(JSON.stringify(earlier));
+  await broadcastChannel(env, earlier, Date.parse("2026-10-14T15:40:00+08:00"));
+  assert.equal(messages.length, 1);
+});
+
+test("normal channel advice includes the 100/101 and 300/301 boundaries", async t => {
+  const { tick, messages } = channelHarness(t);
+  const values = maximum => ({ north: 50, south: 50, east: 50, west: maximum, central: 50 });
+  await tick("2026-10-14T06:00:00+08:00", 100, { values: values(100) });
+  assert.match(messages[0].text, /Normal activities/);
+  await tick("2026-10-14T10:00:00+08:00", 101, { values: values(101) });
+  assert.match(messages[1].text, /Healthy.*reduce/i);
+  await tick("2026-10-14T10:20:00+08:00", 300, { values: values(300) });
+  assert.match(messages[2].text, /Healthy.*avoid/i);
+  await tick("2026-10-14T11:00:00+08:00", 301, { values: values(301) });
+  assert.match(messages[3].text, /Healthy.*minimise outdoor/i);
 });

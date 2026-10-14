@@ -25,6 +25,7 @@ PM2.5 is shown separately as a **1-hour concentration in µg/m³** (`pm25_one_ho
 - Saved readings remain available during NEA outages, with an explicit delayed-data label. Cold-start failures display an error instead of sample values.
 - Telegram `/start`, `/help`, `/psi` and `/psi west` (24-hour PSI only), and `/pm25` and `/pm25 west` (1-hour PM2.5 only) commands. The webhook requires Telegram’s secret header and records handled update IDs for retry deduplication.
 - Private setup script configures Worker secrets, Telegram commands, the webhook, and dashboard links. Tokens are never stored in source files.
+- Automated Telegram broadcasts to [@hazey_sg](https://t.me/hazey_sg): four-hour summaries from 6am SGT, immediate PSI >200 alerts, and hourly updates during an alert episode. Apply migration `0004_channel_broadcasts.sql` before deploying this feature.
 
 ## Cloudflare Free setup
 
@@ -76,7 +77,24 @@ sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev
 
 The Telegram panel stays hidden until the bot’s username and Worker secrets are configured.
 
-The bot responds to commands when requested; it does not subscribe users or send unsolicited alerts. Successful duplicate updates are ignored. If Telegram returns an ambiguous network failure after accepting a message, a retry can still duplicate a reply because Telegram’s `sendMessage` endpoint has no idempotency key.
+The bot responds to commands when requested. People receive automated broadcasts by joining the configured Telegram channel; there are no individual subscriptions. Successful duplicate command updates are ignored. If Telegram returns an ambiguous network failure after accepting a message, a retry can still duplicate a reply or broadcast because Telegram’s `sendMessage` endpoint has no idempotency key.
+
+## Automated channel reports
+
+Create a public Telegram channel and add `@hazey_sg_bot` as an administrator with **Post Messages** enabled. This checkout targets `@hazey_sg`, configured with `TELEGRAM_CHANNEL_ID` in `wrangler.jsonc`; the bot uses the existing `TELEGRAM_BOT_TOKEN` Worker secret. Activation is pending the Cloudflare owner's migration and deployment; see the owner instructions in [HANDOVER.md](HANDOVER.md). Changing the channel requires the same administrator setup. Remove `TELEGRAM_CHANNEL_ID` and redeploy to disable broadcasts.
+
+- Regular reports use fixed Singapore-time slots: **02:00, 06:00, 10:00, 14:00, 18:00, 22:00**.
+- Overall Singapore 24-hour PSI is NEA's regional minimum–maximum range, computed from the five official regional readings supplied by the API. It is not an average or a separate invented national reading.
+- An upper bound **above 200** starts an alert episode and sends immediately on detection. Thereafter, reports use full clock hours; a breach found at 15:20 sends then, followed by 16:00, 17:00, etc.
+- Exactly 200 keeps an existing episode active but does not start one. Below 200 clears the episode silently and resumes the fixed four-hour schedule, without a recovery message. Overlapping regular and hourly slots produce one report.
+- Each report includes all five regional PSI and **1-hour PM2.5 (µg/m³)** readings, separate source timestamps, the dashboard link, and precautions for the greatest regional PSI. PM2.5 concentrations do not trigger the PSI alert.
+- Advice paraphrases the [MOH health advisory published by NEA](https://www.nea.gov.sg/our-services/pollution-control/air-pollution/managing-haze), checked 14 October 2026. Normal activities are permitted at PSI ≤100; restrictions on outdoor exertion/activity increase for 101–200, 201–300 and above 300, with separate guidance for vulnerable groups.
+
+The existing five-minute cron checks for breaches, so “immediate” means on the first successful scheduled detection. Scheduled reports wait for NEA's observation for the current hour and retry during that hour if publication is late. Missed historical reports are not sent in a burst. Stale/future PSI or a failed source refresh do not generate reports or clear the saved alert state. Missing PM2.5 never blocks a PSI report, and delayed saved PM2.5 is labelled explicitly.
+
+Migration `0004_channel_broadcasts.sql` adds durable per-channel reporting state and an atomic lease. Observed alert mode is saved independently of delivery, with a pending first alert for retries, and older observations/revisions cannot reverse newer state. Overlapping cron runs cannot normally double-post; only successful sends consume the reporting slot. Failed sends are retried on subsequent checks, and recovery cancels a pending alert. Future upstream observations are rejected before cache writes. The Telegram ambiguous-delivery limitation described above still applies.
+
+For the existing deployment, run `npm run db:remote` before `npm run deploy`. Verify a real broadcast and the cron's `Channel broadcast sent` log before claiming activation.
 
 ## Local development
 

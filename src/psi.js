@@ -28,6 +28,7 @@ function latestItem(body, dataset) {
 
 export function normalizePsi(body, now = Date.now()) {
   const { item, readingAt, sourceUpdatedAt } = latestItem(body, "PSI");
+  if (Date.parse(readingAt) > now) throw new Error("NEA returned a future PSI observation");
   const regions = REGIONS.map(key => {
     const psi = item.readings?.psi_twenty_four_hourly?.[key];
     if (!Number.isInteger(psi) || psi < 0) throw new Error(`NEA returned an invalid PSI for ${key}`);
@@ -43,6 +44,7 @@ export function normalizePsi(body, now = Date.now()) {
 // 1-hour PM2.5 is a concentration in µg/m³ from NEA's separate PM2.5 dataset, not a PSI value.
 export function normalizePm25(body, now = Date.now()) {
   const { item, readingAt, sourceUpdatedAt } = latestItem(body, "PM2.5");
+  if (Date.parse(readingAt) > now) throw new Error("NEA returned a future PM2.5 observation");
   const regions = REGIONS.map(key => {
     const pm25 = item.readings?.pm25_one_hourly?.[key];
     if (!Number.isFinite(pm25) || pm25 < 0) throw new Error(`NEA returned an invalid PM2.5 for ${key}`);

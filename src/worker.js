@@ -1,5 +1,7 @@
 import { API_URL, PM25_API_URL, REFRESH_INTERVAL, historyPoints, normalizePm25, normalizePsi, isStale, telegramReading } from "./psi.js";
 import { REGIONS } from "../public/psi.js";
+import { telegramApi } from "./telegram.js";
+import { broadcastChannel } from "./broadcast.js";
 
 const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
@@ -51,7 +53,7 @@ async function fetchNea(env, url) {
   return response.json();
 }
 
-export async function refreshPsi(env) {
+export async function refreshPsi(env, { broadcast = false } = {}) {
   const now = Date.now();
   const owner = crypto.randomUUID();
   const lock = await env.PSI_DB.prepare(
@@ -71,7 +73,10 @@ export async function refreshPsi(env) {
       await env.PSI_DB.batch([saveSnapshot(env, "pm25_snapshot", pm25.value), saveHistory(env, "pm25", historyPoint(pm25.value, "pm25"))]);
     } else console.error("PM2.5 refresh failed:", pm25.reason.message);
     if (psi.status === "rejected") throw psi.reason;
-    return await storedSnapshot(env);
+    const snapshot = await storedSnapshot(env);
+    // A stale successful response must not broadcast a retained fresh cache from another refresh.
+    if (broadcast && !isStale(psi.value)) await broadcastChannel(env, snapshot);
+    return snapshot;
   } finally {
     await env.PSI_DB.prepare("UPDATE refresh_lock SET expires_at = 0 WHERE id = 1 AND owner = ?").bind(owner).run();
   }
@@ -129,15 +134,6 @@ export function parseCommand(text, botUsername = "") {
   if (!match) return null;
   if (match[2] && botUsername && match[2].toLowerCase() !== botUsername.replace(/^@/, "").toLowerCase()) return null;
   return { command: match[1].toLowerCase(), argument: (match[3] ?? "").trim().toLowerCase() };
-}
-
-async function telegramApi(env, method, body) {
-  const response = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(10_000)
-  });
-  const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error(`Telegram ${method} failed (${response.status})`);
 }
 
 async function handleTelegram(request, env, ctx) {
@@ -228,7 +224,7 @@ export default {
   },
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(Promise.all([
-      refreshPsi(env),
+      refreshPsi(env, { broadcast: true }).catch(error => console.error("Scheduled refresh or channel broadcast failed:", error.message)),
       env.PSI_DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(Date.now() - 7 * 24 * 60 * 60_000).run()
     ]).catch(error => console.error("Scheduled refresh failed:", error.message))
       .then(() => maintainHistory(env, controller.scheduledTime))

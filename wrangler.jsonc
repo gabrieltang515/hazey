@@ -19,6 +19,7 @@
   "triggers": { "crons": ["*/5 * * * *"] },
   "vars": {
     "TELEGRAM_BOT_USERNAME": "hazey_sg_bot",
+    "TELEGRAM_CHANNEL_ID": "@hazey_sg",
     "PUBLIC_APP_URL": "https://hazey.gabrieltang515.workers.dev"
   }
 }

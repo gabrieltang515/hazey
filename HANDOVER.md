@@ -1,6 +1,43 @@
 # Hazey handover
 
-Updated: 14 October 2026, about 19:50 Singapore time.
+Updated: 14 October 2026, Singapore time. Channel work is ready for the Cloudflare owner to deploy; the earlier live release remains unchanged.
+
+## Channel automation work — 14 October 2026
+
+The owner created the public channel [@hazey_sg](https://t.me/hazey_sg) and confirmed that `@hazey_sg_bot` is an administrator with Post Messages enabled.
+
+- Implemented channel broadcasts and configured `TELEGRAM_CHANNEL_ID` as `@hazey_sg`. The existing command bot and dashboard are preserved.
+- Regular slots: 02:00, 06:00, 10:00, 14:00, 18:00 and 22:00 SGT. Upper end of NEA's overall 24-hour PSI range >200 sends immediately when detected by the five-minute cron, then on clock hours. An existing episode holds at exactly 200 and clears strictly below 200, silently. No recovery post; only one post for overlapping slots.
+- Overall PSI is the minimum–maximum range of NEA's five regional readings. Broadcasts include all five regions' PSI and separate 1-hour PM2.5 readings/timestamps, the website, and PSI-based precautions paraphrased from the MOH advisory on NEA's Managing Haze page (checked 14 October 2026).
+- New `migrations/0004_channel_broadcasts.sql` persists observed alert mode independently of delivery, a pending first alert, successful reporting slots, the processed observation/revision and an atomic channel lease. Failed delivery can retry; recovery cancels pending alerts. Older observations cannot move the mode backwards. Telegram still cannot guarantee exactly-once delivery after ambiguous network failure.
+- Scheduled reports wait for the current hour's observation. Stale or future PSI, or a failed refresh, never sends or clears the episode. Missing PM2.5 is labelled; delayed saved PM2.5 remains labelled and does not block PSI.
+- Future PSI and PM2.5 observations are rejected before cache writes, so they cannot block subsequent valid readings. A stale source response cannot trigger a post from a retained fresh cache.
+- Verification: 40 Node tests pass (26 existing +14 channel/regression tests using real SQLite), Wrangler deployment dry run passes, dependency audit reports no vulnerabilities. Independent review found three delivery/freshness/ordering issues; all were fixed with regression tests and the reviewer confirmed the fixes with a second 40/40 test run. The broadcast message was also previewed using real NEA readings, without posting to Telegram.
+- **Activation pending, intentionally left to the Cloudflare owner:** the requester does not own the Cloudflare account and asked for GitHub commit/push and owner handoff. No production migration, deployment or channel post was performed. The Windows checkout's expired Cloudflare login attempt timed out; do not continue its OAuth flow. Never recreate the existing D1 database or rotate existing secrets unnecessarily.
+
+### Cloudflare owner: activate the channel
+
+Pull the latest `main` in the existing checkout, then run:
+
+```sh
+git pull --ff-only origin main
+npm ci
+npm test
+npx wrangler login
+npx wrangler whoami
+npm run db:remote
+npx wrangler deploy --dry-run
+npm run deploy
+npx wrangler tail --format pretty
+```
+
+Use the existing `gabrieltang515` Cloudflare account and `hazey-psi` D1 database. Apply **0004 before deploying** the new Worker; existing migrations should already be recorded. The current `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` and `NEA_API_KEY` secrets are reused automatically. Do not rerun the bot setup helper merely to enable the channel: it rotates the webhook secret and is unnecessary here.
+
+Confirm `@hazey_sg_bot` still has Post Messages permission in `@hazey_sg`. The five-minute cron begins sending once deployed: if fresh overall PSI is already above 200, its first successful check sends an immediate alert; otherwise the next designated four-hour slot sends once NEA publishes that hour's reading. No manual test-message endpoint was added.
+
+Verify both a real channel message and `Channel broadcast sent (breach/hourly/regular)` in the Worker logs. The owner's next agent should then update this handover with the new deployment version, the applied remote migration and observed delivery evidence. Telegram errors or upstream failures are logged without tokens; failed sends retry on later checks. For rollback/disable, remove `TELEGRAM_CHANNEL_ID` from configuration and redeploy; the additive D1 table can remain.
+
+The older completion statements below describe the dashboard/command-bot release before channel automation.
 
 ## Requested outcome and current status
 
