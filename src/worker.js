@@ -1,7 +1,7 @@
-import { API_URL, REFRESH_INTERVAL, normalizePsi, isStale, telegramReading } from "./psi.js";
+import { API_URL, PM25_API_URL, REFRESH_INTERVAL, normalizePm25, normalizePsi, isStale, telegramReading } from "./psi.js";
 import { REGIONS } from "../public/psi.js";
 
-const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA 24-hour PSI for Singapore.\n\n/psi — all five regions\n/psi north — one region\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
+const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI and 1-hour PM2.5, all regions\n/psi north — one region\n/pm25 — 1-hour PM2.5 only (also /pm25 north)\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
 function json(body, status = 200, extraHeaders = {}) {
   return Response.json(body, { status, headers: {
@@ -10,8 +10,28 @@ function json(body, status = 200, extraHeaders = {}) {
 }
 
 async function storedSnapshot(env) {
-  const row = await env.PSI_DB.prepare("SELECT payload FROM psi_snapshot WHERE id = 1").first();
-  return row ? JSON.parse(row.payload) : null;
+  const row = await env.PSI_DB.prepare(
+    "SELECT payload, (SELECT payload FROM pm25_snapshot WHERE id = 1) AS pm25 FROM psi_snapshot WHERE id = 1"
+  ).first();
+  return row ? { ...JSON.parse(row.payload), pm25: row.pm25 ? JSON.parse(row.pm25) : null } : null;
+}
+
+// Called only with the fixed table names below. An older upstream result must never replace a newer saved observation.
+function saveSnapshot(env, table, snapshot) {
+  return env.PSI_DB.prepare(
+    `INSERT INTO ${table} (id, payload, fetched_at, reading_at, source_updated_at) VALUES (1, ?, ?, ?, ?) ` +
+    "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at, reading_at = excluded.reading_at, source_updated_at = excluded.source_updated_at " +
+    `WHERE excluded.reading_at > ${table}.reading_at OR ` +
+    `(excluded.reading_at = ${table}.reading_at AND excluded.source_updated_at >= ${table}.source_updated_at)`
+  ).bind(JSON.stringify(snapshot), Date.parse(snapshot.fetchedAt), Date.parse(snapshot.readingAt), Date.parse(snapshot.sourceUpdatedAt)).run();
+}
+
+async function fetchNea(env, url) {
+  const headers = { Accept: "application/json" };
+  if (env.NEA_API_KEY) headers["x-api-key"] = env.NEA_API_KEY;
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`NEA request failed (${response.status})`);
+  return response.json();
 }
 
 export async function refreshPsi(env) {
@@ -22,18 +42,15 @@ export async function refreshPsi(env) {
   ).bind(owner, now + 30_000, now).first();
   if (!lock) return null;
   try {
-    const headers = { Accept: "application/json" };
-    if (env.NEA_API_KEY) headers["x-api-key"] = env.NEA_API_KEY;
-    const response = await fetch(API_URL, { headers, signal: AbortSignal.timeout(10_000) });
-    if (!response.ok) throw new Error(`NEA request failed (${response.status})`);
-    const snapshot = normalizePsi(await response.json());
-    // An older upstream result must never replace a newer saved observation.
-    await env.PSI_DB.prepare(
-      "INSERT INTO psi_snapshot (id, payload, fetched_at, reading_at, source_updated_at) VALUES (1, ?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at, reading_at = excluded.reading_at, source_updated_at = excluded.source_updated_at " +
-      "WHERE excluded.reading_at > psi_snapshot.reading_at OR " +
-      "(excluded.reading_at = psi_snapshot.reading_at AND excluded.source_updated_at >= psi_snapshot.source_updated_at)"
-    ).bind(JSON.stringify(snapshot), Date.parse(snapshot.fetchedAt), Date.parse(snapshot.readingAt), Date.parse(snapshot.sourceUpdatedAt)).run();
+    const [psi, pm25] = await Promise.allSettled([
+      fetchNea(env, API_URL).then(body => normalizePsi(body)),
+      fetchNea(env, PM25_API_URL).then(body => normalizePm25(body))
+    ]);
+    // PM2.5 is supplementary: its failure must neither block nor discard a PSI update.
+    if (psi.status === "fulfilled") await saveSnapshot(env, "psi_snapshot", psi.value);
+    if (pm25.status === "fulfilled") await saveSnapshot(env, "pm25_snapshot", pm25.value);
+    else console.error("PM2.5 refresh failed:", pm25.reason.message);
+    if (psi.status === "rejected") throw psi.reason;
     return await storedSnapshot(env);
   } finally {
     await env.PSI_DB.prepare("UPDATE refresh_lock SET expires_at = 0 WHERE id = 1 AND owner = ?").bind(owner).run();
@@ -58,7 +75,7 @@ async function latest(env, ctx, waitForRefresh = false) {
 
 export function parseCommand(text, botUsername = "") {
   if (typeof text !== "string") return null;
-  const match = text.trim().match(/^\/([a-z]+)(?:@([a-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
+  const match = text.trim().match(/^\/([a-z0-9_]+)(?:@([a-z0-9_]+))?(?:\s+([\s\S]*))?$/i);
   if (!match) return null;
   if (match[2] && botUsername && match[2].toLowerCase() !== botUsername.replace(/^@/, "").toLowerCase()) return null;
   return { command: match[1].toLowerCase(), argument: (match[3] ?? "").trim().toLowerCase() };
@@ -88,7 +105,7 @@ async function handleTelegram(request, env, ctx) {
   const parsed = parseCommand(message.text, env.TELEGRAM_BOT_USERNAME);
   if (!parsed) return json({ ok: true });
   const { command, argument } = parsed;
-  if (!["start", "help", "psi"].includes(command) && message.chat.type !== "private") return json({ ok: true });
+  if (!["start", "help", "psi", "pm25"].includes(command) && message.chat.type !== "private") return json({ ok: true });
 
   const now = Date.now();
   const claim = await env.PSI_DB.prepare(
@@ -103,12 +120,12 @@ async function handleTelegram(request, env, ctx) {
 
   try {
     let text = HELP;
-    if (command === "psi") {
+    if (command === "psi" || command === "pm25") {
       if (argument && !REGIONS.includes(argument)) {
-        text = "Choose north, south, east, west, or central.\n\nExample: /psi west\nAll regions: /psi";
+        text = `Choose north, south, east, west, or central.\n\nExample: /${command} west\nAll regions: /${command}`;
       } else {
-        try { text = telegramReading(await latest(env, ctx, true), argument || null); }
-        catch { text = "NEA readings are temporarily unavailable and there is no saved reading yet. Please try /psi again shortly."; }
+        try { text = telegramReading(await latest(env, ctx, true), argument || null, { pm25Only: command === "pm25" }); }
+        catch { text = `NEA readings are temporarily unavailable and there is no saved reading yet. Please try /${command} again shortly.`; }
       }
     }
     const reply = { chat_id: message.chat.id, text, link_preview_options: { is_disabled: true } };
@@ -138,7 +155,8 @@ export default {
           const snapshot = await latest(env, ctx);
           const botUsername = (env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
           const botReady = env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET && /^[a-z0-9_]{5,32}$/i.test(botUsername);
-          return json({ ...snapshot, stale: isStale(snapshot), botUsername: botReady ? botUsername : null });
+          const pm25 = snapshot.pm25 && { ...snapshot.pm25, stale: isStale(snapshot.pm25) };
+          return json({ ...snapshot, stale: isStale(snapshot), pm25, botUsername: botReady ? botUsername : null });
         } catch {
           return json({ error: "PSI readings are temporarily unavailable. Please try again shortly." }, 503, { "Retry-After": "30" });
         }

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#173d32">
-  <meta name="description" content="The latest NEA 24-hour PSI readings for Singapore’s north, south, east, west, and central regions.">
-  <title>Hazey · Singapore PSI</title>
+  <meta name="description" content="The latest NEA 24-hour PSI and 1-hour PM2.5 readings for Singapore’s north, south, east, west, and central regions.">
+  <title>Hazey · Singapore PSI and PM2.5</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/styles.css">
   <script type="module" src="/app.js"></script>
@@ -24,7 +24,7 @@
         <div>
           <p class="eyebrow">A little clarity, whatever the weather</p>
           <h1 id="page-title">Keep an eye<br>on the air.</h1>
-          <p class="intro-copy">The latest PSI readings across Singapore.<br> Five regions. One clear view.</p>
+          <p class="intro-copy">The latest PSI and PM2.5 readings across Singapore.<br> Five regions. One clear view.</p>
         </div>
         <div class="summary" id="summary" data-category="unknown">
           <div class="summary-top"><span>Highest regional PSI</span><span class="summary-icon" aria-hidden="true">↗</span></div>
@@ -39,7 +39,7 @@
           <div><p class="eyebrow">Your neighbourhood, at a glance</p><h2 id="readings-title">Around the island</h2></div>
           <button class="refresh-button" id="refresh-button" type="button"><span class="refresh-icon" aria-hidden="true">↻</span><span id="refresh-label">Refresh readings</span></button>
         </div>
-        <div class="reading-meta"><span class="feed-state" id="feed-state"><span class="feed-dot"></span><span id="feed-label">Connecting to NEA readings</span></span><span id="reading-time">Reading time: —</span></div>
+        <div class="reading-meta"><span class="feed-state" id="feed-state"><span class="feed-dot"></span><span id="feed-label">Connecting to NEA readings</span></span><span class="reading-times"><span id="reading-time">PSI reading: —</span><span id="pm25-time">1-hour PM2.5: —</span></span></div>
         <div class="region-grid" id="region-grid"></div>
         <div class="update-meta"><span id="source-updated">NEA update: —</span><span>Checks for updates every minute</span></div>
       </section>
@@ -53,12 +53,19 @@
           <div data-category="very-unhealthy"><span class="scale-bar"></span><strong>201–300</strong><span>Very unhealthy</span></div>
           <div data-category="hazardous"><span class="scale-bar"></span><strong>Above 300</strong><span>Hazardous</span></div>
         </div>
+        <div class="scale-heading scale-subheading"><h3 id="pm25-scale-title">1-hour PM2.5 bands</h3><p>PM2.5 is a concentration in µg/m³.<br>These are NEA’s 1‑hour bands.</p></div>
+        <div class="scale-grid pm25-scale" aria-labelledby="pm25-scale-title">
+          <div data-category="good"><span class="scale-bar"></span><strong>0–55</strong><span>Band I · Normal</span></div>
+          <div data-category="moderate"><span class="scale-bar"></span><strong>56–150</strong><span>Band II · Elevated</span></div>
+          <div data-category="unhealthy"><span class="scale-bar"></span><strong>151–250</strong><span>Band III · High</span></div>
+          <div data-category="very-unhealthy"><span class="scale-bar"></span><strong>251 and above</strong><span>Band IV · Very high</span></div>
+        </div>
         <a class="text-link" href="https://www.nea.gov.sg/our-services/pollution-control/air-pollution/air-quality" target="_blank" rel="noopener noreferrer">Read NEA’s air quality guidance <span aria-hidden="true">↗</span></a>
       </section>
 
       <section class="telegram-panel" id="telegram-panel" aria-labelledby="telegram-title" hidden>
         <div class="telegram-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m21 3-3.4 17-5.3-4-2.8 2.7.6-4.4L19 5.9l-11 7-5-1.6L21 3Z" fill="currentColor"/></svg></div>
-        <div class="telegram-copy"><p class="eyebrow">A quick check, wherever you are</p><h2 id="telegram-title">The same readings. In Telegram.</h2><p>Send <code>/psi</code> for all regions, or <code>/psi west</code> for one.</p></div>
+        <div class="telegram-copy"><p class="eyebrow">A quick check, wherever you are</p><h2 id="telegram-title">The same readings. In Telegram.</h2><p>Send <code>/psi</code> for PSI and PM2.5 in all regions, <code>/psi west</code> for one, or <code>/pm25</code> for PM2.5 only.</p></div>
         <button class="telegram-action" id="telegram-copy" type="button">Copy /psi <span aria-hidden="true">↗</span></button>
         <a class="telegram-action" id="telegram-link" hidden target="_blank" rel="noopener noreferrer">Open the bot <span aria-hidden="true">↗</span></a>
         <span class="sr-only" id="copy-status" role="status"></span>

@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import worker, { refreshPsi } from "../src/worker.js";
-import { API_URL, normalizePsi } from "../src/psi.js";
+import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 
 function fixture(timestamp = new Date().toISOString()) {
   return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
@@ -11,9 +11,20 @@ function fixture(timestamp = new Date().toISOString()) {
   }] } };
 }
 
+function pm25Fixture(timestamp = new Date().toISOString()) {
+  return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
+    readings: { pm25_one_hourly: { north: 55, south: 56, east: 150, west: 257, central: 151 } }
+  }] } };
+}
+
+const nea = url => Response.json(url === PM25_API_URL ? pm25Fixture() : fixture());
+
 function setup(t) {
   const db = new DatabaseSync(":memory:");
-  db.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
+  const migrations = new URL("../migrations/", import.meta.url);
+  for (const file of readdirSync(migrations).filter(name => name.endsWith(".sql")).sort()) {
+    db.exec(readFileSync(new URL(file, migrations), "utf8"));
+  }
   t.after(() => db.close());
   const env = {
     PSI_DB: { prepare(sql) {
@@ -37,11 +48,15 @@ function webhook(updateId, command = "/psi", secret = "test-secret") {
 test("cold API fetch stores real PSI data and an older result cannot replace it", async t => {
   const { db, env, ctx } = setup(t);
   let body = fixture();
-  t.mock.method(globalThis, "fetch", async url => { assert.equal(url, API_URL); return Response.json(body); });
+  t.mock.method(globalThis, "fetch", async url => {
+    assert.ok([API_URL, PM25_API_URL].includes(url));
+    return Response.json(url === API_URL ? body : pm25Fixture());
+  });
   const response = await worker.fetch(new Request("https://hazey.example/api/psi"), env, ctx);
   assert.equal(response.status, 200);
   const result = await response.json();
   assert.equal(result.regions.length, 5); assert.equal(result.stale, false);
+  assert.equal(result.pm25.regions.find(r => r.key === "west").pm25, 257); assert.equal(result.pm25.stale, false);
   assert.equal(db.prepare("SELECT count(*) AS n FROM psi_snapshot").get().n, 1);
   body = fixture("2020-01-01T00:00:00Z");
   await refreshPsi(env);
@@ -63,7 +78,7 @@ test("cold-start failure is 503 and refresh lock prevents concurrent NEA calls",
   t.mock.method(globalThis, "fetch", async () => { calls++; return Response.json({ code: 24, data: null }); });
   assert.equal((await worker.fetch(new Request("https://hazey.example/api/psi"), env, ctx)).status, 503);
   db.prepare("UPDATE refresh_lock SET expires_at = ?").run(Date.now() + 60_000);
-  assert.equal(await refreshPsi(env), null); assert.equal(calls, 1);
+  assert.equal(await refreshPsi(env), null); assert.equal(calls, 2, "one refresh fetches PSI and PM2.5 once each");
 });
 test("webhook rejects incorrect secrets before making any API call", async t => {
   const { env, ctx } = setup(t);
@@ -74,12 +89,13 @@ test("valid regional commands reply once and duplicate updates are ignored", asy
   const { db, env, ctx } = setup(t);
   const replies = [];
   t.mock.method(globalThis, "fetch", async (url, init) => {
-    if (url === API_URL) return Response.json(fixture());
+    if (url === API_URL || url === PM25_API_URL) return nea(url);
     replies.push(JSON.parse(init.body)); return Response.json({ ok: true, result: {} });
   });
   assert.equal((await worker.fetch(webhook(10, "/psi west"), env, ctx)).status, 200);
   assert.equal((await worker.fetch(webhook(10, "/psi west"), env, ctx)).status, 200);
   assert.equal(replies.length, 1); assert.match(replies[0].text, /West: 101 — Unhealthy/);
+  assert.match(replies[0].text, /1-hour PM2.5 \(µg\/m³\)\nWest: 257 — Very high \(Band IV\)/);
   assert.doesNotMatch(replies[0].text, /North:/);
   assert.equal(db.prepare("SELECT state FROM telegram_updates").get().state, "sent");
 });
@@ -95,9 +111,11 @@ test("unknown regions show help; unrelated messages do not trigger replies", asy
   t.mock.method(globalThis, "fetch", async (url, init) => { replies.push(JSON.parse(init.body)); return Response.json({ ok: true }); });
   await worker.fetch(webhook(12, "/psi jurong"), env, ctx);
   assert.match(replies[0].text, /Choose north, south, east, west, or central/);
+  await worker.fetch(webhook(15, "/pm25 jurong"), env, ctx);
+  assert.match(replies[1].text, /Example: \/pm25 west/);
   await worker.fetch(webhook(13, "hello"), env, ctx);
   await worker.fetch(webhook(14, "/psi@other_bot"), env, ctx);
-  assert.equal(replies.length, 1);
+  assert.equal(replies.length, 2);
 });
 test("routes enforce methods and do not expose unknown API paths as assets", async t => {
   const { env, ctx } = setup(t);
@@ -111,7 +129,7 @@ test("an older revision of the same observation cannot replace newer values", as
   const { db, env } = setup(t);
   const timestamp = new Date().toISOString();
   const body = fixture(timestamp);
-  t.mock.method(globalThis, "fetch", async () => Response.json(body));
+  t.mock.method(globalThis, "fetch", async url => Response.json(url === API_URL ? body : pm25Fixture()));
   await refreshPsi(env);
   body.data.items[0].updatedTimestamp = new Date(Date.parse(timestamp) - 60_000).toISOString();
   body.data.items[0].readings.psi_twenty_four_hourly.west = 999;
@@ -135,9 +153,38 @@ test("an in-flight duplicate asks Telegram to retry; abandoned processing can be
 
 test("the dashboard advertises the bot only when its username and secrets are configured", async t => {
   const { env, ctx } = setup(t);
-  t.mock.method(globalThis, "fetch", async () => Response.json(fixture()));
+  t.mock.method(globalThis, "fetch", async url => nea(url));
   const request = () => new Request("https://hazey.example/api/psi");
   assert.equal((await (await worker.fetch(request(), env, ctx)).json()).botUsername, "hazey_psi_bot");
   delete env.TELEGRAM_BOT_TOKEN;
   assert.equal((await (await worker.fetch(request(), env, ctx)).json()).botUsername, null);
+});
+
+test("PM2.5 failures never block PSI, and saved PM2.5 survives later PM2.5 failures", async t => {
+  const { env, ctx } = setup(t);
+  let pm25Up = false;
+  t.mock.method(globalThis, "fetch", async url => url === API_URL ? Response.json(fixture())
+    : pm25Up ? Response.json(pm25Fixture()) : new Response("rate limited", { status: 429 }));
+  const first = await (await worker.fetch(new Request("https://hazey.example/api/psi"), env, ctx)).json();
+  assert.equal(first.regions.length, 5); assert.equal(first.pm25, null);
+  pm25Up = true;
+  assert.equal((await refreshPsi(env)).pm25.regions.find(r => r.key === "west").pm25, 257);
+  pm25Up = false;
+  const saved = await refreshPsi(env);
+  assert.equal(saved.pm25.regions.find(r => r.key === "west").pm25, 257);
+  assert.equal(saved.regions.length, 5);
+});
+
+test("/pm25 replies with banded 1-hour PM2.5 only; /psi labels PSI and PM2.5 separately", async t => {
+  const { env, ctx } = setup(t);
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url === API_URL || url === PM25_API_URL) return nea(url);
+    replies.push(JSON.parse(init.body).text); return Response.json({ ok: true, result: {} });
+  });
+  assert.equal((await worker.fetch(webhook(30, "/pm25 West"), env, ctx)).status, 200);
+  assert.equal((await worker.fetch(webhook(31, "/psi"), env, ctx)).status, 200);
+  assert.match(replies[0], /West: 257 — Very high \(Band IV\)/);
+  assert.doesNotMatch(replies[0], /24-hour PSI|North:/);
+  assert.match(replies[1], /24-hour PSI\n[\s\S]*Central: 200 — Unhealthy[\s\S]*1-hour PM2.5 \(µg\/m³\)\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
 });

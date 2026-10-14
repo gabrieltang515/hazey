@@ -10,6 +10,15 @@ export function category(value) {
   return { label: "Hazardous", key: "hazardous" };
 }
 
+// NEA's 1-hour PM2.5 concentration bands (µg/m³). The keys reuse the PSI colour tones.
+export function pm25Band(value) {
+  if (!Number.isFinite(value) || value < 0) return { label: "Unavailable", band: "", key: "unknown" };
+  if (value <= 55) return { label: "Normal", band: "I", key: "good" };
+  if (value <= 150) return { label: "Elevated", band: "II", key: "moderate" };
+  if (value <= 250) return { label: "High", band: "III", key: "unhealthy" };
+  return { label: "Very high", band: "IV", key: "very-unhealthy" };
+}
+
 export function regionName(key) {
   return key.charAt(0).toUpperCase() + key.slice(1);
 }

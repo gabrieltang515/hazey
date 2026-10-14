@@ -1,15 +1,21 @@
 # Hazey handover
 
-Updated: 14 October 2026, Singapore time.
+Updated: 14 October 2026, about 18:15 Singapore time.
 
 ## Requested outcome and current status
 
-The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot showing the latest regional Singapore PSI from NEA/data.gov.sg, using Cloudflare Free storage. They also requested a new GitHub repository containing the code and this handover before the current agent stops.
+The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot showing the latest regional Singapore PSI from NEA/data.gov.sg, using Cloudflare Free storage, plus a private GitHub repository with this handover. On 14 October 2026 they also asked for PM2.5 levels.
 
-- **Web app: deployed and working** at https://hazey.gabrieltang515.workers.dev.
-- **Storage: provisioned and initialized** in Cloudflare D1; production fetches persist the latest snapshot.
-- **Telegram backend: implemented and tested, activation pending.** The owner has not created the bot in BotFather. No bot token or webhook secret has been configured, and no actual Telegram delivery has been verified.
-- **GitHub: private repository created** at https://github.com/gabrieltang515/hazey. Reuse this repository; do not run the repository-creation helper again. The handover and all source are included in the initial push on `main`.
+- **Web app: deployed and working** at https://hazey.gabrieltang515.workers.dev, now with 24-hour PSI **and** NEA 1-hour PM2.5 for all five regions.
+- **Storage: provisioned and initialized** in Cloudflare D1. Migrations `0001_init.sql` and `0002_pm25.sql` are applied to production and local.
+- **Telegram bot: activated as [@hazey_sg_bot](https://t.me/hazey_sg_bot).** The owner created it in BotFather and ran the hidden-prompt setup helper, which installed `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET`, registered the webhook, set the command menu, and redeployed. Production logs show four real Telegram updates at 17:59–18:00 SGT, each answered `200`; the Worker returns `200` only after Telegram's `sendMessage` succeeds. The owner had not yet described the reply text at the time of writing.
+- **GitHub: private repository** at https://github.com/gabrieltang515/hazey, branch `main`. Reuse it; do not run the repository-creation helper again.
+
+## Remaining steps
+
+1. **Add a data.gov.sg API key (owner action, recommended).** The 18:00 SGT scheduled refresh on 14 October was rejected by NEA with HTTP `429` (rate limited). Unauthenticated requests from Cloudflare's shared egress are throttled; saved readings were preserved and the next refresh succeeded, but refreshes can be skipped. Each refresh now makes two NEA calls (PSI and PM2.5). The owner should create a free API key on data.gov.sg, then in a terminal in this repo run `sh scripts/hazey.sh secret put NEA_API_KEY` and paste it at Wrangler's hidden prompt. The Worker already sends it as `x-api-key`, matching the spec. Never paste it into chat.
+2. **Optional: show `/pm25` in the bot's command menu.** `/pm25` already works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu (it also rotates the webhook secret and redeploys current source; run `sh scripts/hazey.sh test` first).
+3. Ask the owner to confirm the bot's reply text for `/psi`, `/psi west`, and `/pm25` matches `/api/psi`.
 
 ## Existing Cloudflare resources
 
@@ -24,7 +30,8 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 | D1 binding | `PSI_DB` |
 | Assets binding | `ASSETS` |
 | Scheduled trigger | `*/5 * * * *` (every five minutes; cron is UTC) |
-| Current deployment version | `cbf492d3-f831-4541-8d73-10e4bc7ab5ce` |
+| Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
+| Current deployment version | `04dec9dd-9485-4b07-9655-5809c7806b5e` (PM2.5 release, 14 Oct 2026 ~18:07 SGT) |
 
 Cloudflare sign-in was completed successfully through Wrangler OAuth. The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
 
@@ -32,14 +39,15 @@ The public account/database IDs in source are resource identifiers, not credenti
 
 ## Architecture and important behavior
 
-- `src/worker.js` serves the same-origin `/api/psi`, the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
-- `src/psi.js` validates the NEA response and normalizes it. It requires valid 24-hour PSI values for all five regions, chooses the most recent observation, and tolerates missing optional pollutant fields.
-- `public/psi.js` shares PSI category boundaries and SGT formatting between the browser and bot.
-- `public/index.html`, `public/styles.css`, and `public/app.js` implement the responsive dashboard. They show 24-hour PSI, each category, reading/update timestamps, optional PM2.5/PM10 concentrations, refresh, and delayed-data states. The Telegram panel stays hidden until a bot username and both Worker secrets are configured.
-- `migrations/0001_init.sql` creates a singleton PSI snapshot, a refresh lease, and Telegram update records. Refresh leases are atomic. Older observations and older revisions of the same observation cannot overwrite newer data.
+- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
+- `src/psi.js` validates and normalizes both NEA responses. PSI requires valid 24-hour PSI values for all five regions and tolerates missing optional 24-hour pollutant fields. PM2.5 requires a non-negative `pm25_one_hourly` concentration for all five regions. Both choose the most recent observation.
+- `public/psi.js` shares PSI category boundaries, NEA 1-hour PM2.5 bands (I Normal 0–55, II Elevated 56–150, III High 151–250, IV Very high ≥251), and SGT formatting between the browser and bot.
+- `public/index.html`, `public/styles.css`, and `public/app.js` implement the responsive dashboard: 24-hour PSI and category, a 1-hour PM2.5 row with its band on each region card, separate PSI and PM2.5 reading times, optional 24-hour PM2.5/PM10 details, PSI and PM2.5 band legends, refresh, and delayed-data states for each dataset. The Telegram panel stays hidden until a bot username and both Worker secrets are configured.
+- `migrations/0001_init.sql` creates a singleton PSI snapshot, a refresh lease, and Telegram update records. `migrations/0002_pm25.sql` adds a separate singleton PM2.5 snapshot. Refresh leases are atomic. Older observations and older revisions of the same observation cannot overwrite newer data in either table.
+- One refresh fetches PSI and PM2.5 in parallel. Each saves independently: a PM2.5 failure is logged and never blocks or discards a PSI update, and saved PM2.5 survives later PM2.5 failures. The overdue-cache check uses the PSI snapshot age.
 - Snapshot refreshes run every five minutes, including while the page is closed. Browser checks run every minute. Requests also refresh an overdue cache; browser requests return saved data while refreshing, while bot commands can await the refresh.
 - Data is marked stale when the saved fetch is more than 15 minutes old or the observation is more than two hours old. Those are application freshness thresholds, not promises about NEA publication frequency.
-- Telegram commands are `/start`, `/help`, `/psi`, and `/psi <region>`. Supported regions are north, south, east, west, central. Mentions addressed to another configured bot are ignored.
+- Telegram commands are `/start`, `/help`, `/psi` and `/psi <region>` (24-hour PSI section plus a separate 1-hour PM2.5 section), and `/pm25` and `/pm25 <region>` (PM2.5 only). Supported regions are north, south, east, west, central. Command names may contain digits. Mentions addressed to another configured bot are ignored.
 - The webhook requires `X-Telegram-Bot-Api-Secret-Token`. Successful duplicate updates are ignored; processing updates are retried; failed sends release the record for retry. Deduplication records are pruned after seven days.
 - Telegram `sendMessage` has no idempotency key: an ambiguous network failure after Telegram accepts a message can still produce a duplicate on retry. This limit is documented rather than claiming guaranteed exactly-once delivery.
 
@@ -53,32 +61,26 @@ Latest endpoint: `https://api-open.data.gov.sg/v2/real-time/api/psi`, without a 
 
 The actual response was fetched and matched the v2 shape: `code`, `data.items`, `timestamp`, `updatedTimestamp`, and `readings.psi_twenty_four_hourly`. Current live responses omit `psi_three_hourly`, despite that field appearing in the downloaded spec. Do not invent three-hour values or substitute PM2.5. Actual timestamps include `+08:00`; parse their offsets and format with Asia/Singapore.
 
-No NEA API key is required for the current fetch schedule. A higher-rate-limit key can optionally be added as the Worker secret `NEA_API_KEY`.
+PM2.5 endpoint: `https://api-open.data.gov.sg/v2/real-time/api/pm25`. No spec file was supplied for it; the live response was fetched on 14 October 2026 and has `code`, `data.regionMetadata`, and `data.items[]` with `timestamp`, `updatedTimestamp` (`+08:00`), and `readings.pm25_one_hourly` for all five regions. It is a concentration in µg/m³, never PSI.
+
+No NEA API key is strictly required, but unauthenticated calls from Cloudflare received HTTP `429` at least once (see Remaining steps). Add a key as the Worker secret `NEA_API_KEY`; the spec's `ApiKeyAuth` scheme sends it as the `x-api-key` header.
 
 ## Verification completed
 
-- **18 Node tests passed.** They cover PSI category boundaries, response validation, omitted optional fields, SGT, source/cache freshness, region filtering, group mentions, actual SQLite migration/query behavior, saved-data fallback, atomic refresh leases, prevention of snapshot/revision regression, webhook authentication, successful deduplication, interrupted update recovery, failed Telegram sends, routes/methods, and hiding unconfigured bot links.
-- Wrangler **deployment dry run passed**.
-- Local and production D1 **migration applied successfully**.
-- Local Cloudflare workerd runtime fetched actual NEA readings for all five regions and stored them.
-- Cloudflare **production deployment succeeded**, including the five-minute trigger.
-- Headless Chrome tested the **deployed** app at **1440px desktop** and **390px mobile** widths: all five live region cards, SGT timestamps, no horizontal overflow, working pollutant details, and completed refresh actions. Screenshots were inspected. A small mobile copy-spacing issue found in the screenshot was corrected before the final publish.
-- Actual Telegram bot creation, token installation, webhook registration, and end-to-end delivery are **not completed** because the owner has not yet created the bot.
+Initial build (earlier on 14 October 2026):
 
-## Next action: activate the Telegram bot
+- Wrangler deployment dry run, local and production D1 migration, local workerd fetch of real NEA readings, and production deployment with the five-minute trigger all succeeded.
+- Headless Chrome checked the deployed app at 1440px and 390px; screenshots were inspected.
 
-1. Have the owner open the verified https://t.me/BotFather account, send `/newbot`, choose **Hazey** as the display name, and choose an available username ending in `bot`, such as `hazey_psi_bot`. The suggested username has not been checked for availability. `hazey` alone is not a valid bot username.
-2. Do not ask them to paste the token into chat. In a terminal opened in this repo, run:
+Telegram activation and PM2.5 release (17:55–18:15 SGT, 14 October 2026):
 
-   ```sh
-   sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev
-   ```
-
-3. The script's hidden prompt accepts the BotFather token. It calls `getMe`, generates a random webhook secret, installs both secrets with Wrangler, updates the bot username/public URL in config, redeploys, sets Telegram commands, registers the webhook, and checks `getWebhookInfo`.
-4. Open the printed bot URL and verify `/start`, `/psi`, and `/psi west` in real Telegram. Confirm the region readings and timestamp match `/api/psi`; no values should be hardcoded.
-5. Verify the Telegram panel appears on the web app, update this handover with the actual bot URL and delivery result, then commit and push changed config/docs. Never commit either secret.
-
-The activation helper redeploys with current source. If the source has changed, run appropriate checks before running it. If the helper fails after installing secrets, repair and rerun it; do not claim activation succeeded based only on a deployed bot handler.
+- Setup helper completed for `@hazey_sg_bot`; `wrangler secret list` shows both Telegram secrets; `/api/psi` reports `botUsername: "hazey_sg_bot"`; the dashboard shows the "Open the bot" panel (screenshots inspected).
+- `wrangler tail` showed four `POST /telegram/webhook` updates from Telegram answered `200`.
+- `wrangler tail` showed the five-minute cron firing (17:55 refresh succeeded; 18:00 got NEA `429`, saved readings preserved). After the PM2.5 deploy, the 18:10 refresh stored the first production PM2.5 snapshot.
+- **22 Node tests pass**, adding PM2.5 band boundaries, PM2.5 validation, PM2.5 failure isolation from PSI, saved PM2.5 surviving failures, `/pm25` routing with digits, and labelled PSI/PM2.5 bot sections.
+- Local `wrangler dev` against real NEA returned PSI and PM2.5 for all five regions.
+- `0002_pm25.sql` applied to local and production D1; version `04dec9dd-9485-4b07-9655-5809c7806b5e` deployed.
+- Browser check (now also asserting five PM2.5 values and the PM2.5 SGT time) passed locally and against production at desktop and mobile widths; screenshots inspected.
 
 ## Development and deployment commands
 
@@ -101,6 +103,7 @@ The checked-in wrapper locates that fallback automatically:
 ```sh
 sh scripts/hazey.sh test
 sh scripts/hazey.sh d1 migrations apply PSI_DB --local
+sh scripts/hazey.sh d1 migrations apply PSI_DB --remote   # apply before deploying code that needs a new table
 sh scripts/hazey.sh dev
 sh scripts/hazey.sh deploy --dry-run
 sh scripts/hazey.sh deploy
@@ -111,7 +114,9 @@ Wrangler is installed locally and pinned by `package-lock.json` (version 4.151.0
 
 Browser verification uses installed Chrome and Node's native DevTools/WebSocket support, with no browser test dependency. Set `CHROME_BIN` for non-macOS installations. Screenshots are saved in the system temporary directory, not the repository. The browser profile is temporary and removed after checks.
 
-The local development DB created with the initial placeholder ID is disposable and separate from production. After the real database ID was written into config, apply `--local` migrations again before starting a fresh dev session. Production is already initialized; do not drop or recreate its database.
+The local development DB is disposable and separate from production. Production is initialized with both migrations; do not drop or recreate its database. Apply any new migration to production **before** deploying code that queries it.
+
+The Telegram setup helper rewrites `wrangler.jsonc` with `JSON.stringify` formatting; after rerunning it, restore the original formatting so the diff shows only intended changes.
 
 Git remote: `https://github.com/gabrieltang515/hazey.git`, branch `main`, visibility **private**. The saved GitHub credential was verified as `gabrieltang515`. Local commit identity uses Gabriel Tang's GitHub noreply address. Do not read credential-helper output into logs. Ignore `node_modules`, `.wrangler`, `.dev.vars`, and `.env`.
 

@@ -61,9 +61,12 @@ async function main() {
       }
       assert.equal(readings?.length, 5, `${viewport.name}: five region cards`);
       assert.ok(readings.every(value => /^\d+$/.test(value)), `${viewport.name}: real readings loaded`);
-      const layout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, time: document.getElementById('reading-time').textContent, refreshDisabled: document.getElementById('refresh-button').disabled })");
+      const pm25 = await evaluate("Array.from(document.querySelectorAll('.pm25-value'), e => e.textContent)");
+      assert.ok(pm25?.length === 5 && pm25.every(value => /^\d+(\.\d+)? µg\/m³$/.test(value)), `${viewport.name}: five 1-hour PM2.5 readings`);
+      const layout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, time: document.getElementById('reading-time').textContent, pm25Time: document.getElementById('pm25-time').textContent, refreshDisabled: document.getElementById('refresh-button').disabled })");
       assert.ok(layout.scrollWidth <= layout.width, `${viewport.name}: no horizontal overflow`);
       assert.match(layout.time, /SGT/);
+      assert.match(layout.pm25Time, /SGT/);
       assert.equal(layout.refreshDisabled, false);
       await evaluate("document.querySelector('.region-card summary').click()");
       assert.equal(await evaluate("document.querySelector('.region-card details').open"), true);
@@ -76,7 +79,7 @@ async function main() {
       const screenshot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
       const filename = join(tmpdir(), `hazey-${viewport.name}.png`);
       await writeFile(filename, Buffer.from(screenshot.data, "base64"));
-      console.log(`${viewport.name}: 5 live readings, SGT time, no overflow, details and refresh passed. Screenshot: ${filename}`);
+      console.log(`${viewport.name}: 5 live PSI and PM2.5 readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
       await send("Target.closeTarget", { targetId });
     }
   } finally {

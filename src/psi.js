@@ -1,6 +1,7 @@
-import { REGIONS, category, regionName, singaporeTime } from "../public/psi.js";
+import { REGIONS, category, pm25Band, regionName, singaporeTime } from "../public/psi.js";
 
 export const API_URL = "https://api-open.data.gov.sg/v2/real-time/api/psi";
+export const PM25_API_URL = "https://api-open.data.gov.sg/v2/real-time/api/pm25";
 export const REFRESH_INTERVAL = 5 * 60_000;
 
 function timestamp(value) {
@@ -14,16 +15,19 @@ function concentration(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-export function normalizePsi(body, now = Date.now()) {
+function latestItem(body, dataset) {
   if (body?.code !== 0 || !Array.isArray(body.data?.items) || !body.data.items.length) {
-    throw new Error("NEA returned no successful PSI reading");
+    throw new Error(`NEA returned no successful ${dataset} reading`);
   }
   const items = body.data.items.filter(item => Number.isFinite(Date.parse(item.timestamp)));
   const item = items.reduce((latest, candidate) =>
     !latest || Date.parse(candidate.timestamp) > Date.parse(latest.timestamp) ? candidate : latest, null);
-  if (!item) throw new Error("NEA returned no dated PSI reading");
-  const readingAt = timestamp(item.timestamp);
-  const sourceUpdatedAt = timestamp(item.updatedTimestamp ?? item.timestamp);
+  if (!item) throw new Error(`NEA returned no dated ${dataset} reading`);
+  return { item, readingAt: timestamp(item.timestamp), sourceUpdatedAt: timestamp(item.updatedTimestamp ?? item.timestamp) };
+}
+
+export function normalizePsi(body, now = Date.now()) {
+  const { item, readingAt, sourceUpdatedAt } = latestItem(body, "PSI");
   const regions = REGIONS.map(key => {
     const psi = item.readings?.psi_twenty_four_hourly?.[key];
     if (!Number.isInteger(psi) || psi < 0) throw new Error(`NEA returned an invalid PSI for ${key}`);
@@ -36,17 +40,49 @@ export function normalizePsi(body, now = Date.now()) {
   return { readingAt, sourceUpdatedAt, fetchedAt: new Date(now).toISOString(), regions };
 }
 
+// 1-hour PM2.5 is a concentration in µg/m³ from NEA's separate PM2.5 dataset, not a PSI value.
+export function normalizePm25(body, now = Date.now()) {
+  const { item, readingAt, sourceUpdatedAt } = latestItem(body, "PM2.5");
+  const regions = REGIONS.map(key => {
+    const pm25 = item.readings?.pm25_one_hourly?.[key];
+    if (!Number.isFinite(pm25) || pm25 < 0) throw new Error(`NEA returned an invalid PM2.5 for ${key}`);
+    return { key, name: regionName(key), pm25 };
+  });
+  return { readingAt, sourceUpdatedAt, fetchedAt: new Date(now).toISOString(), regions };
+}
+
 export function isStale(snapshot, now = Date.now()) {
   return now - Date.parse(snapshot.fetchedAt) > 15 * 60_000 || now - Date.parse(snapshot.readingAt) > 2 * 60 * 60_000;
 }
 
-export function telegramReading(snapshot, selectedRegion, stale = isStale(snapshot)) {
-  const regions = selectedRegion ? snapshot.regions.filter(r => r.key === selectedRegion) : snapshot.regions;
-  const lines = regions.map(r => `${r.name}: ${r.psi} — ${category(r.psi).label}`);
+const pick = (regions, selected) => selected ? regions.filter(r => r.key === selected) : regions;
+
+function psiSection(snapshot, selectedRegion, now) {
   return [
-    "Singapore · 24-hour PSI", "", ...lines, "",
+    "24-hour PSI",
+    ...pick(snapshot.regions, selectedRegion).map(r => `${r.name}: ${r.psi} — ${category(r.psi).label}`),
     `Reading: ${singaporeTime(snapshot.readingAt)} SGT`,
-    ...(stale ? ["⚠️ Showing saved readings. Fresh data is currently delayed."] : []),
-    "Source: NEA via data.gov.sg", "", "All regions: /psi · One region: /psi west"
-  ].join("\n");
+    ...(isStale(snapshot, now) ? ["⚠️ Showing saved PSI readings. Fresh data is currently delayed."] : [])
+  ];
+}
+
+function pm25Section(pm25, selectedRegion, now) {
+  if (!pm25) return ["1-hour PM2.5: not available yet. Please try again shortly."];
+  return [
+    "1-hour PM2.5 (µg/m³)",
+    ...pick(pm25.regions, selectedRegion).map(r => {
+      const band = pm25Band(r.pm25);
+      return `${r.name}: ${r.pm25} — ${band.label} (Band ${band.band})`;
+    }),
+    `Reading: ${singaporeTime(pm25.readingAt)} SGT`,
+    ...(isStale(pm25, now) ? ["⚠️ Showing saved PM2.5 readings. Fresh data is currently delayed."] : [])
+  ];
+}
+
+export function telegramReading(snapshot, selectedRegion, { pm25Only = false, now = Date.now() } = {}) {
+  const sections = pm25Only ? [pm25Section(snapshot.pm25, selectedRegion, now)]
+    : [psiSection(snapshot, selectedRegion, now), pm25Section(snapshot.pm25, selectedRegion, now)];
+  const hint = pm25Only ? "All regions: /pm25 · One region: /pm25 west · With PSI: /psi"
+    : "All regions: /psi · One region: /psi west · PM2.5 only: /pm25";
+  return ["Singapore air quality", "", ...sections.flatMap(section => [...section, ""]), "Source: NEA via data.gov.sg", "", hint].join("\n");
 }

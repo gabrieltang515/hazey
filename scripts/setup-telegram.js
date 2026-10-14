@@ -82,7 +82,8 @@ async function main() {
   await wrangler(["secret", "put", "TELEGRAM_WEBHOOK_SECRET"], webhookSecret);
   await wrangler(["deploy"]);
   await api(token, "setMyCommands", { commands: [
-    { command: "psi", description: "Latest Singapore PSI; add a region, e.g. /psi west" },
+    { command: "psi", description: "Latest PSI and PM2.5; add a region, e.g. /psi west" },
+    { command: "pm25", description: "Latest 1-hour PM2.5 only; add a region, e.g. /pm25 west" },
     { command: "help", description: "How to use Hazey" },
     { command: "start", description: "Welcome and available commands" }
   ] });

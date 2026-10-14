@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { category, REGIONS, singaporeTime } from "../public/psi.js";
-import { normalizePsi, isStale, telegramReading } from "../src/psi.js";
+import { category, pm25Band, REGIONS, singaporeTime } from "../public/psi.js";
+import { normalizePm25, normalizePsi, isStale, telegramReading } from "../src/psi.js";
 import { parseCommand } from "../src/worker.js";
 
 export function fixture(timestamp = "2026-10-14T14:00:00+08:00") {
@@ -45,13 +45,15 @@ test("staleness considers both the stored snapshot and observation age", () => {
   assert.equal(isStale({ ...result, readingAt: "2026-10-14T01:00:00Z" }, now), true);
 });
 test("bot replies show all regions, SGT, categories, and stale warnings", () => {
-  const result = normalizePsi(fixture());
-  const all = telegramReading(result, null, false);
+  const now = Date.parse("2026-10-14T07:00:00Z");
+  const result = normalizePsi(fixture(), now);
+  const all = telegramReading(result, null, { now });
   for (const region of REGIONS) assert.match(all.toLowerCase(), new RegExp(`${region}:`));
-  assert.match(all, /24-hour PSI/); assert.match(all, /SGT/);
-  const west = telegramReading(result, "west", true);
+  assert.match(all, /24-hour PSI/); assert.match(all, /SGT/); assert.doesNotMatch(all, /saved/);
+  assert.match(all, /1-hour PM2.5: not available yet/);
+  const west = telegramReading(result, "west", { now: now + 16 * 60_000 });
   assert.match(west, /West: 153 — Unhealthy/); assert.doesNotMatch(west, /North:/);
-  assert.match(west, /saved readings/);
+  assert.match(west, /saved PSI readings/);
   assert.equal(singaporeTime("2026-10-14T06:00:00Z"), singaporeTime("2026-10-14T14:00:00+08:00"));
 });
 test("commands handle group mentions, region casing, and other bots", () => {
@@ -59,4 +61,34 @@ test("commands handle group mentions, region casing, and other bots", () => {
   assert.equal(parseCommand("/psi@other_bot", "hazey_psi_bot"), null);
   assert.equal(parseCommand("hello"), null);
   assert.deepEqual(parseCommand("/start"), { command: "start", argument: "" });
+  assert.deepEqual(parseCommand("/pm25@hazey_psi_bot East", "hazey_psi_bot"), { command: "pm25", argument: "east" });
+});
+
+export function pm25Fixture(timestamp = "2026-10-14T15:00:00+08:00") {
+  return { code: 0, data: { items: [{ timestamp, updatedTimestamp: "2026-10-14T15:00:36+08:00", readings: {
+    pm25_one_hourly: { north: 111, south: 148, west: 257, east: 190, central: 226 }
+  } }] } };
+}
+
+test("PM2.5 bands follow NEA's 1-hour thresholds at every boundary", () => {
+  for (const [value, expected] of [[0,"I"],[55,"I"],[56,"II"],[150,"II"],[151,"III"],[250,"III"],[251,"IV"],[900,"IV"],[-1,""],[null,""],["42",""]]) {
+    assert.equal(pm25Band(value).band, expected, `PM2.5 ${value}`);
+  }
+  assert.equal(pm25Band(257).label, "Very high");
+});
+test("PM2.5 uses the live v2 one-hour shape and rejects invalid regional values", () => {
+  const now = Date.parse("2026-10-14T07:10:00Z");
+  const result = normalizePm25(pm25Fixture(), now);
+  assert.deepEqual(result.regions.map(r => r.key), REGIONS);
+  assert.equal(result.regions.find(r => r.key === "west").pm25, 257);
+  assert.equal(result.sourceUpdatedAt, "2026-10-14T15:00:36+08:00");
+  assert.equal(isStale(result, now), false);
+  for (const bad of [undefined, null, -1, "42"]) {
+    const body = pm25Fixture(); body.data.items[0].readings.pm25_one_hourly.east = bad;
+    assert.throws(() => normalizePm25(body));
+  }
+  assert.throws(() => normalizePm25({ code: 0, data: { items: [] } }));
+  const reply = telegramReading({ ...normalizePsi(fixture(), now), pm25: result }, "east", { now, pm25Only: true });
+  assert.match(reply, /1-hour PM2.5 \(µg\/m³\)\nEast: 190 — High \(Band III\)\nReading: .*SGT/);
+  assert.doesNotMatch(reply, /PSI\n|West:/);
 });
