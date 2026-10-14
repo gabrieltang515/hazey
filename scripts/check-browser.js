@@ -55,14 +55,32 @@ async function main() {
       await send("Page.navigate", { url }, sessionId);
       let readings;
       for (let attempt = 0; attempt < 40; attempt++) {
-        readings = await evaluate("Array.from(document.querySelectorAll('.region-value'), e => e.textContent)");
+        readings = await evaluate("Array.from(document.querySelectorAll('.reading-value'), e => e.textContent)");
         if (readings?.length === 5 && readings.every(value => /^\d+$/.test(value))) break;
         await delay(500);
       }
       assert.equal(readings?.length, 5, `${viewport.name}: five region cards`);
       assert.ok(readings.every(value => /^\d+$/.test(value)), `${viewport.name}: real readings loaded`);
-      const pm25 = await evaluate("Array.from(document.querySelectorAll('.pm25-value'), e => e.textContent)");
+      const pm25 = await evaluate("Array.from(document.querySelectorAll('.other-value'), e => e.textContent)");
       assert.ok(pm25?.length === 5 && pm25.every(value => /^\d+(\.\d+)? µg\/m³$/.test(value)), `${viewport.name}: five 1-hour PM2.5 readings`);
+      const mapBands = await evaluate("Array.from(document.querySelectorAll('.map-region'), e => e.dataset.band)");
+      assert.ok(mapBands.length === 5 && mapBands.every(band => band !== "unknown"), `${viewport.name}: map shows five banded regions`);
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (await evaluate("document.querySelectorAll('.spark svg, .spark-empty').length === 5 && !document.querySelector('.spark-empty')?.textContent.startsWith('Loading')")) break;
+        await delay(500);
+      }
+      const trends = await evaluate("({ charts: document.querySelectorAll('.spark svg .spark-line').length, rows: document.querySelectorAll('#history-body tr').length })");
+      assert.ok(trends.charts === 5 || trends.charts === 0, `${viewport.name}: trend charts render together`);
+      await evaluate("document.querySelector('#metric-switch [data-metric=pm25]').click()");
+      const switched = await evaluate("({ primary: Array.from(document.querySelectorAll('.reading-value'), e => e.textContent), other: Array.from(document.querySelectorAll('.other-value'), e => e.textContent), unit: document.querySelector('.reading-unit').textContent })");
+      assert.ok(switched.primary.every(value => /^\d+(\.\d+)?$/.test(value)) && switched.other.every(value => /^\d+$/.test(value)), `${viewport.name}: PM2.5 view swaps readings`);
+      assert.match(switched.unit, /µg\/m³/);
+      await delay(800);
+      if (viewport.name === "desktop") {
+        const pm25Shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
+        await writeFile(join(tmpdir(), "hazey-desktop-pm25.png"), Buffer.from(pm25Shot.data, "base64"));
+      }
+      await evaluate("document.querySelector('#metric-switch [data-metric=psi]').click()");
       const layout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, time: document.getElementById('reading-time').textContent, pm25Time: document.getElementById('pm25-time').textContent, refreshDisabled: document.getElementById('refresh-button').disabled })");
       assert.ok(layout.scrollWidth <= layout.width, `${viewport.name}: no horizontal overflow`);
       assert.match(layout.time, /SGT/);
@@ -79,7 +97,13 @@ async function main() {
       const screenshot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
       const filename = join(tmpdir(), `hazey-${viewport.name}.png`);
       await writeFile(filename, Buffer.from(screenshot.data, "base64"));
-      console.log(`${viewport.name}: 5 live PSI and PM2.5 readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
+      await evaluate("document.getElementById('theme-toggle').click()");
+      assert.equal(await evaluate("document.documentElement.dataset.theme"), "dark", `${viewport.name}: theme toggles to dark`);
+      await delay(600);
+      const dark = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
+      await writeFile(join(tmpdir(), `hazey-${viewport.name}-dark.png`), Buffer.from(dark.data, "base64"));
+      await evaluate("document.getElementById('theme-toggle').click()");
+      console.log(`${viewport.name}: ${trends.charts} trend charts (${trends.rows} table rows), map, PSI/PM2.5 switch, dark theme, 5 live readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
       await send("Target.closeTarget", { targetId });
     }
   } finally {

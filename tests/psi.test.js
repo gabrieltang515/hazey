@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { category, pm25Band, REGIONS, singaporeTime } from "../public/psi.js";
-import { normalizePm25, normalizePsi, isStale, telegramReading } from "../src/psi.js";
+import { historyPoints, normalizePm25, normalizePsi, isStale, telegramReading } from "../src/psi.js";
 import { parseCommand } from "../src/worker.js";
 
 export function fixture(timestamp = "2026-10-14T14:00:00+08:00") {
@@ -92,4 +92,15 @@ test("PM2.5 uses the live v2 one-hour shape and rejects invalid regional values"
   const reply = telegramReading({ ...normalizePsi(fixture(), now), pm25: result }, "east", { now, dataset: "pm25" });
   assert.match(reply, /1-hour PM2.5 \(µg\/m³\)\n\nEast: 190 — High \(Band III\)\n\nReading: .*SGT/);
   assert.doesNotMatch(reply, /PSI\n|West:/);
+});
+
+test("history keeps every complete hour and skips malformed ones", () => {
+  const body = fixture();
+  body.data.items.push({ timestamp: "2026-10-14T13:00:00+08:00", readings: { psi_twenty_four_hourly: { north: 1, south: 2, east: 3, west: 4 } } });
+  body.data.items.push({ timestamp: "not a time", readings: fixture().data.items[0].readings });
+  const points = historyPoints(body, "psi");
+  assert.equal(points.length, 1);
+  assert.deepEqual(points[0].values, { north: 110, south: 134, east: 149, west: 153, central: 148 });
+  assert.equal(historyPoints(pm25Fixture(), "pm25")[0].values.west, 257);
+  assert.throws(() => historyPoints({ code: 24 }, "psi"));
 });

@@ -51,6 +51,27 @@ export function normalizePm25(body, now = Date.now()) {
   return { readingAt, sourceUpdatedAt, fetchedAt: new Date(now).toISOString(), regions };
 }
 
+export const HISTORY_FIELDS = { psi: "psi_twenty_four_hourly", pm25: "pm25_one_hourly" };
+
+// Every complete hourly observation in a date-filtered NEA response, for the 24-hour trend charts.
+// Incomplete or malformed hours are skipped rather than failing the whole day.
+export function historyPoints(body, dataset) {
+  if (body?.code !== 0 || !Array.isArray(body.data?.items)) throw new Error(`NEA returned no ${dataset} history`);
+  const field = HISTORY_FIELDS[dataset];
+  const valid = dataset === "psi" ? Number.isInteger : Number.isFinite;
+  return body.data.items.flatMap(item => {
+    try {
+      const point = { readingAt: timestamp(item.timestamp), sourceUpdatedAt: timestamp(item.updatedTimestamp ?? item.timestamp), values: {} };
+      for (const key of REGIONS) {
+        const value = item.readings?.[field]?.[key];
+        if (!valid(value) || value < 0) return [];
+        point.values[key] = value;
+      }
+      return [point];
+    } catch { return []; }
+  });
+}
+
 export function isStale(snapshot, now = Date.now()) {
   return now - Date.parse(snapshot.fetchedAt) > 15 * 60_000 || now - Date.parse(snapshot.readingAt) > 2 * 60 * 60_000;
 }

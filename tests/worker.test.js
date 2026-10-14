@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
-import worker, { refreshPsi } from "../src/worker.js";
+import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 
 function fixture(timestamp = new Date().toISOString()) {
@@ -30,9 +30,10 @@ function setup(t) {
     PSI_DB: { prepare(sql) {
       let args = [];
       return { bind(...values) { args = values; return this; }, async first() { return db.prepare(sql).get(...args) ?? null; },
-        async run() { const result = db.prepare(sql).run(...args); return { meta: { changes: result.changes } }; }
+        async run() { const result = db.prepare(sql).run(...args); return { meta: { changes: result.changes } }; },
+        async all() { return { results: db.prepare(sql).all(...args) }; }
       };
-    } },
+    }, async batch(statements) { const results = []; for (const statement of statements) results.push(await statement.run()); return results; } },
     TELEGRAM_BOT_TOKEN: "123:TEST_TOKEN", TELEGRAM_WEBHOOK_SECRET: "test-secret", TELEGRAM_BOT_USERNAME: "hazey_psi_bot",
     ASSETS: { fetch: async () => new Response("asset") }
   };
@@ -192,4 +193,61 @@ test("/pm25 replies with banded 1-hour PM2.5 only; /psi replies with PSI only; h
   assert.doesNotMatch(replies[1], /µg\/m³|Band/);
   assert.match(replies[2], /1-hour PM2.5 \(µg\/m³\)\n\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
   assert.match(replies[3], /\/pm25 — 1-hour PM2.5, all regions\n\/pm25 north — PM2.5 for one region/);
+});
+
+function dayFixture(field, hours, values) {
+  return { code: 0, data: { items: hours.map(timestamp => ({ timestamp, updatedTimestamp: timestamp, readings: { [field]: { ...values } } })) } };
+}
+
+test("refreshes append each new reading to the 24-hour history served at /api/history", async t => {
+  const { env, ctx } = setup(t);
+  t.mock.method(globalThis, "fetch", async url => nea(url));
+  await refreshPsi(env);
+  const response = await worker.fetch(new Request("https://hazey.example/api/history"), env, ctx);
+  assert.equal(response.status, 200);
+  const series = await response.json();
+  assert.equal(series.psi.length, 1); assert.equal(series.pm25.length, 1);
+  assert.deepEqual({ ...series.psi[0], at: undefined }, { at: undefined, north: 50, south: 51, east: 100, west: 101, central: 200 });
+  assert.equal(series.pm25[0].west, 257);
+  assert.equal((await worker.fetch(new Request("https://hazey.example/api/history", { method: "POST" }), env, ctx)).status, 405);
+});
+
+test("backfill stores complete hours from today and yesterday, skips bad hours, and keeps newer revisions", async t => {
+  const { db, env, ctx } = setup(t);
+  const now = Date.parse("2026-10-14T10:20:00Z"); // 18:20 SGT
+  const requested = [];
+  t.mock.method(globalThis, "fetch", async url => {
+    requested.push(url);
+    const date = new URL(url).searchParams.get("date");
+    if (url.startsWith(PM25_API_URL)) return Response.json(dayFixture("pm25_one_hourly",
+      date === "2026-10-14" ? ["2026-10-14T18:00:00+08:00", "2026-10-14T17:00:00+08:00"] : ["2026-10-13T18:00:00+08:00"],
+      { north: 10, south: 20, east: 30, west: 40, central: 50 }));
+    const body = dayFixture("psi_twenty_four_hourly",
+      date === "2026-10-14" ? ["2026-10-14T18:00:00+08:00", "2026-10-14T17:00:00+08:00"] : ["2026-10-13T16:00:00+08:00", "2026-10-13T18:00:00+08:00"],
+      { north: 60, south: 70, east: 80, west: 90, central: 100 });
+    if (date === "2026-10-14") delete body.data.items[1].readings.psi_twenty_four_hourly.west;
+    return Response.json(body);
+  });
+  await backfillHistory(env, now);
+  assert.deepEqual(requested.map(url => new URL(url).searchParams.get("date")).sort(), ["2026-10-13", "2026-10-13", "2026-10-14", "2026-10-14"]);
+  const rows = dataset => db.prepare("SELECT reading_at FROM reading_history WHERE dataset = ? ORDER BY reading_at").all(dataset).map(r => new Date(r.reading_at).toISOString());
+  // 16:00 yesterday is outside the 25-hour window; 17:00 today is missing a region.
+  assert.deepEqual(rows("psi"), ["2026-10-13T10:00:00.000Z", "2026-10-14T10:00:00.000Z"]);
+  assert.deepEqual(rows("pm25"), ["2026-10-13T10:00:00.000Z", "2026-10-14T09:00:00.000Z", "2026-10-14T10:00:00.000Z"]);
+  db.prepare("UPDATE reading_history SET source_updated_at = source_updated_at + 60000, readings = '{\"north\":1}' WHERE dataset = 'psi' AND reading_at = ?").run(Date.parse("2026-10-14T10:00:00Z"));
+  await backfillHistory(env, now);
+  assert.equal(JSON.parse(db.prepare("SELECT readings FROM reading_history WHERE dataset = 'psi' AND reading_at = ?").get(Date.parse("2026-10-14T10:00:00Z")).readings).north, 1);
+});
+
+test("scheduled runs backfill hourly and prune history older than two windows", async t => {
+  const { db, env } = setup(t);
+  const scheduledTime = Date.parse("2026-10-14T10:10:00Z");
+  db.prepare("INSERT INTO reading_history VALUES ('psi', ?, ?, '{}')").run(scheduledTime - 3 * 24 * 60 * 60_000, scheduledTime - 3 * 24 * 60 * 60_000);
+  const urls = [];
+  t.mock.method(globalThis, "fetch", async url => { urls.push(url); return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url); });
+  const pending = [];
+  await worker.scheduled({ scheduledTime }, env, { waitUntil(promise) { pending.push(promise); } });
+  await Promise.all(pending);
+  assert.equal(urls.filter(url => url.includes("?date=")).length, 4);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM reading_history WHERE reading_at < ?").get(scheduledTime - 2 * 24 * 60 * 60_000).n, 0);
 });

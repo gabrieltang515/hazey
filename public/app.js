@@ -1,109 +1,542 @@
-import { REGIONS, category, pm25Band, regionName, singaporeTime } from "./psi.js";
+import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionName, singaporeClock } from "./psi.js";
+import { MAP_VIEWBOX, LAND_PATH, REGION_SHAPES, REGION_LABELS } from "./map-data.js";
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+const DAY = 24 * 60 * 60_000;
 const byId = id => document.getElementById(id);
-const cards = new Map();
-let loading = false;
-let snapshot = null;
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+const storage = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch { /* Preferences are optional. */ } }
+};
 
+const METRICS = {
+  psi: {
+    label: "24-hour PSI", unit: "24-hour PSI", bands: PSI_BANDS, band: category, suffix: "",
+    note: "PSI is an index, not a concentration. Colours follow NEA’s 24-hour PSI bands."
+  },
+  pm25: {
+    label: "1-hour PM2.5", unit: "µg/m³", bands: PM25_BANDS, band: pm25Band, suffix: " µg/m³",
+    note: "PM2.5 is a concentration in µg/m³. Colours follow NEA’s 1-hour PM2.5 bands."
+  }
+};
+
+const state = {
+  data: null, history: null, historyKey: "", loading: false, mapReady: false,
+  metric: storage.get("hazey-metric") === "pm25" ? "pm25" : "psi", newUntil: 0
+};
+
+function svg(tag, attributes = {}, parent) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) node.setAttribute(name, value);
+  parent?.append(node);
+  return node;
+}
+const setText = (root, selector, text) => { root.querySelector(selector).textContent = text; };
+const announce = message => { byId("copy-status").textContent = message; };
+
+/* ---------- Region cards ---------- */
+
+const cards = new Map();
 for (const key of REGIONS) {
   const card = document.createElement("article");
-  card.className = "region-card";
-  card.dataset.category = "unknown";
+  card.className = "region-card is-loading";
+  card.id = `card-${key}`;
+  card.dataset.region = key;
+  card.dataset.band = "unknown";
   card.setAttribute("aria-labelledby", `region-${key}`);
-  card.innerHTML = `<div class="region-top"><h3 id="region-${key}">${regionName(key)}</h3><span class="region-letter" aria-hidden="true">${key[0].toUpperCase()}</span></div><p class="region-value">—</p><p class="region-unit">24-hour PSI</p><span class="category-badge psi-band">Loading</span><div class="pm25-now" data-category="unknown"><span class="pm25-label">1-hour PM2.5</span><span class="pm25-reading"><span class="pm25-value">—</span><span class="category-badge pm25-band">Loading</span></span></div><details><summary>Pollutant details</summary><dl><div><dt>PM2.5 · 24h</dt><dd class="pm25">—</dd></div><div><dt>PM10 · 24h</dt><dd class="pm10">—</dd></div></dl></details>`;
+  card.innerHTML = `
+    <div class="card-head"><h3 id="region-${key}">${regionName(key)}</h3><span class="badge primary-badge" data-band="unknown">Loading</span></div>
+    <p class="reading"><span class="reading-value">000</span><span class="reading-unit"></span></p>
+    <p class="reading-change"></p>
+    <div class="spark" tabindex="0" role="group"></div>
+    <div class="spark-axis" aria-hidden="true"><span>24 h ago</span><span class="spark-end-label"></span></div>
+    <dl class="card-facts"><div><dt class="other-label"></dt><dd><span class="other-value"></span><span class="badge other-badge" data-band="unknown"></span></dd></div></dl>
+    <details><summary>24-hour averages</summary><dl><div><dt>PM2.5</dt><dd class="avg-pm25">—</dd></div><div><dt>PM10</dt><dd class="avg-pm10">—</dd></div></dl></details>`;
+  card.addEventListener("pointerenter", () => mapRegion(key)?.classList.add("is-active"));
+  card.addEventListener("pointerleave", () => mapRegion(key)?.classList.remove("is-active"));
   byId("region-grid").append(card);
   cards.set(key, card);
 }
 
-function notice(message) {
-  byId("notice").textContent = message;
-  byId("notice").hidden = !message;
+function setBadge(badge, band) {
+  badge.dataset.band = band.key;
+  badge.textContent = band.label;
+  badge.title = band.band ? `Band ${band.band}` : "";
 }
+
+/* ---------- Map ---------- */
+
+const map = byId("map");
+const viewBoxWidth = Number(MAP_VIEWBOX.split(/\s+/)[2]);
+const mapRegion = key => map.querySelector(`.map-region[data-region="${key}"]`);
+const mapLabels = new Map();
+
+function buildMap() {
+  map.setAttribute("viewBox", MAP_VIEWBOX);
+  const clip = svg("clipPath", { id: "land-clip" }, svg("defs", {}, map));
+  svg("path", { d: LAND_PATH }, clip);
+  svg("path", { class: "map-land", d: LAND_PATH }, map);
+  const regions = svg("g", { "clip-path": "url(#land-clip)" }, map);
+  REGIONS.forEach((key, index) => {
+    const region = svg("path", { class: "map-region", d: REGION_SHAPES[key], "data-region": key, "data-band": "unknown", tabindex: "0", role: "button" }, regions);
+    region.style.setProperty("--i", index);
+    region.addEventListener("click", () => focusCard(key));
+    region.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); focusCard(key); }
+    });
+  });
+  svg("path", { class: "map-coast", d: LAND_PATH }, map);
+  for (const key of REGIONS) {
+    const text = svg("text", { class: "map-label", "text-anchor": "middle", "aria-hidden": "true" }, map);
+    const name = svg("tspan", { class: "map-label-name" }, text);
+    name.textContent = regionName(key);
+    const value = svg("tspan", { class: "map-label-value" }, text);
+    value.textContent = "–";
+    mapLabels.set(key, { text, name, value });
+  }
+  placeMapLabels();
+}
+
+// Keep label type at a constant on-screen size whatever the map's rendered width.
+function placeMapLabels() {
+  const width = map.getBoundingClientRect().width;
+  if (!width) return;
+  const unit = viewBoxWidth / width;
+  const compact = width < 480;
+  const namePx = compact ? 11.5 : 13, valuePx = compact ? 19 : 26;
+  for (const [key, { text, name, value }] of mapLabels) {
+    const { x, y } = REGION_LABELS[key];
+    text.setAttribute("x", x);
+    text.setAttribute("y", y - (valuePx * 0.2) * unit);
+    name.setAttribute("x", x);
+    name.setAttribute("font-size", namePx * unit);
+    value.setAttribute("x", x);
+    value.setAttribute("dy", valuePx * 1.05 * unit);
+    value.setAttribute("font-size", valuePx * unit);
+  }
+}
+
+function focusCard(key) {
+  const card = cards.get(key);
+  card.scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "center" });
+  card.classList.add("is-highlighted");
+  setTimeout(() => card.classList.remove("is-highlighted"), 1800);
+  card.querySelector(".spark").focus({ preventScroll: true });
+}
+
+/* ---------- Data helpers ---------- */
 
 const validPm25 = pm25 => Array.isArray(pm25?.regions) && Number.isFinite(Date.parse(pm25.readingAt)) &&
   REGIONS.every(key => pm25.regions.some(r => r.key === key && Number.isFinite(r.pm25) && r.pm25 >= 0));
 
-function render(data) {
+function currentValues(data) {
   const pm25 = validPm25(data.pm25) ? data.pm25 : null;
-  for (const region of data.regions) {
-    const card = cards.get(region.key);
-    const band = category(region.psi);
-    card.dataset.category = band.key;
-    card.querySelector(".region-value").textContent = region.psi;
-    card.querySelector(".psi-band").textContent = band.label;
-    const hourly = pm25?.regions.find(r => r.key === region.key).pm25;
-    const pmBand = pm25Band(hourly);
-    card.querySelector(".pm25-now").dataset.category = pmBand.key;
-    card.querySelector(".pm25-value").textContent = pm25 ? `${hourly} µg/m³` : "—";
-    card.querySelector(".pm25-band").textContent = pm25 ? `${pmBand.label} · Band ${pmBand.band}` : "Unavailable";
+  return {
+    psi: Object.fromEntries(data.regions.map(region => [region.key, region.psi])),
+    pm25: pm25 && Object.fromEntries(pm25.regions.map(region => [region.key, region.pm25]))
+  };
+}
+
+const formatValue = (metric, value) => `${value}${METRICS[metric].suffix}`;
+const listRegions = keys => keys.length === 5 ? "all five regions"
+  : `the ${keys.map(regionName).join(keys.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, " and $1")}`;
+
+function relativeTime(timestamp) {
+  const minutes = Math.round((Date.now() - Date.parse(timestamp)) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.round(minutes / 60)} h ago`;
+}
+
+/* ---------- Rendering ---------- */
+
+function render() {
+  const { data, metric } = state;
+  if (!data) return;
+  const values = currentValues(data);
+  const primary = values[metric];
+  const other = metric === "psi" ? "pm25" : "psi";
+  const config = METRICS[metric];
+
+  for (const key of REGIONS) {
+    const card = cards.get(key);
+    const band = primary ? config.band(primary[key]) : config.band(NaN);
+    card.classList.remove("is-loading");
+    card.dataset.band = band.key;
+    setBadge(card.querySelector(".primary-badge"), band);
+    setText(card, ".reading-value", primary ? String(primary[key]) : "—");
+    setText(card, ".reading-unit", config.unit);
+    setText(card, ".other-label", METRICS[other].label);
+    const otherValue = values[other]?.[key];
+    setText(card, ".other-value", values[other] ? formatValue(other, otherValue) : "Unavailable");
+    setBadge(card.querySelector(".other-badge"), METRICS[other].band(values[other] ? otherValue : NaN));
+    const region = data.regions.find(r => r.key === key);
     for (const pollutant of ["pm25", "pm10"]) {
-      card.querySelector(`.${pollutant}`).textContent = Number.isFinite(region[pollutant]) ? `${region[pollutant]} µg/m³` : "Unavailable";
+      setText(card, `.avg-${pollutant}`, Number.isFinite(region[pollutant]) ? `${region[pollutant]} µg/m³` : "Unavailable");
     }
   }
-  const highest = Math.max(...data.regions.map(region => region.psi));
-  const highestRegions = data.regions.filter(region => region.psi === highest).map(region => region.name);
-  byId("highest-value").textContent = highest;
-  byId("summary").dataset.category = category(highest).key;
-  byId("highest-category").textContent = category(highest).label;
-  byId("highest-region").textContent = highestRegions.length === 5 ? "All regions" : highestRegions.join(" · ");
-  byId("reading-time").textContent = `PSI reading: ${singaporeTime(data.readingAt)} SGT`;
-  byId("pm25-time").textContent = pm25 ? `1-hour PM2.5: ${singaporeTime(pm25.readingAt)} SGT${pm25.stale ? " · delayed" : ""}` : "1-hour PM2.5: unavailable";
-  byId("source-updated").textContent = `NEA update: ${singaporeTime(data.sourceUpdatedAt)} SGT`;
-  byId("feed-state").dataset.state = data.stale ? "stale" : "ready";
-  byId("feed-label").textContent = data.stale ? "Saved reading · update delayed" : "Latest available NEA reading";
-  notice(data.stale ? "Fresh readings are delayed. These are the last saved NEA readings; check the reading time before using them."
-    : !pm25 ? "1-hour PM2.5 readings are temporarily unavailable. PSI readings below are current."
-    : pm25.stale ? "Fresh 1-hour PM2.5 readings are delayed. The PM2.5 values shown are the last saved readings; check their reading time." : "");
+
+  for (const key of REGIONS) {
+    const band = primary ? config.band(primary[key]) : config.band(NaN);
+    const region = mapRegion(key);
+    region.dataset.band = band.key;
+    region.setAttribute("aria-label", primary
+      ? `${regionName(key)}: ${config.label} ${formatValue(metric, primary[key])}, ${band.label}. Show ${regionName(key)} details.`
+      : `${regionName(key)}: ${config.label} unavailable.`);
+    mapLabels.get(key).value.textContent = primary ? String(primary[key]) : "–";
+  }
+  // The one orchestrated moment: regions tint in turn on first load; later changes recolour together.
+  if (!state.mapReady) {
+    state.mapReady = true;
+    map.classList.add("is-revealing");
+    requestAnimationFrame(() => requestAnimationFrame(() => map.classList.add("is-ready")));
+    setTimeout(() => map.classList.remove("is-revealing"), 1400);
+  }
+
+  byId("map-note").textContent = config.note;
+  const present = new Set(primary ? REGIONS.map(key => config.band(primary[key]).key) : []);
+  byId("legend").replaceChildren(...config.bands.map(band => {
+    const item = document.createElement("li");
+    item.dataset.band = band.key;
+    item.classList.toggle("is-present", present.has(band.key));
+    const range = document.createElement("span");
+    range.className = "legend-range";
+    range.textContent = band.range;
+    item.append(band.band ? `${band.label} (${band.band})` : band.label, " ", range);
+    return item;
+  }));
+
+  renderVerdict(primary, metric);
+  const pm25 = validPm25(data.pm25) ? data.pm25 : null;
+  byId("reading-time").textContent = `24-hour PSI as of ${singaporeClock(data.readingAt)} SGT${data.stale ? ", delayed" : ""}`;
+  byId("pm25-time").textContent = pm25 ? `1-hour PM2.5 as of ${singaporeClock(pm25.readingAt)} SGT${pm25.stale ? ", delayed" : ""}` : "1-hour PM2.5 unavailable";
+  byId("notice").textContent = data.stale ? "Fresh readings are delayed. These are the last saved NEA readings; check the reading time before relying on them."
+    : !pm25 ? "1-hour PM2.5 readings are temporarily unavailable. The 24-hour PSI readings shown are current."
+    : pm25.stale ? "Fresh 1-hour PM2.5 readings are delayed. The PM2.5 values shown are the last saved readings; check their reading time." : "";
+  byId("notice").hidden = !byId("notice").textContent;
+
   byId("telegram-panel").hidden = !data.botUsername;
   if (data.botUsername && /^[a-z0-9_]{5,32}$/i.test(data.botUsername)) {
     byId("telegram-link").href = `https://t.me/${data.botUsername}`;
     byId("telegram-link").hidden = false;
     byId("telegram-copy").hidden = true;
   }
+  renderLive();
+  renderTrends();
+}
+
+function renderVerdict(values, metric) {
+  const config = METRICS[metric];
+  if (!values) {
+    byId("verdict").dataset.band = "unknown";
+    byId("verdict-headline").textContent = "1-hour PM2.5 is unavailable right now";
+    byId("verdict-detail").textContent = "Switch to 24-hour PSI for current readings.";
+    return;
+  }
+  const order = config.bands.map(band => band.key);
+  const bands = REGIONS.map(key => config.band(values[key])).sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+  const [low, high] = [bands[0], bands.at(-1)];
+  const highest = Math.max(...REGIONS.map(key => values[key]));
+  const where = listRegions(REGIONS.filter(key => values[key] === highest));
+  byId("verdict").dataset.band = high.key;
+  byId("verdict-headline").textContent = low.key === high.key ? `${high.label} across Singapore`
+    : `${low.label} to ${high.label.toLowerCase()} across Singapore`;
+  byId("verdict-detail").textContent = `The highest ${config.label} is ${formatValue(metric, highest)}, in ${where}.`;
+}
+
+function renderLive() {
+  const live = byId("live");
+  const { data } = state;
+  if (!data) return;
+  const pm25 = validPm25(data.pm25) ? data.pm25 : null;
+  const latestReading = pm25 && Date.parse(pm25.readingAt) > Date.parse(data.readingAt) ? pm25.readingAt : data.readingAt;
+  const isNew = Date.now() < state.newUntil;
+  live.dataset.state = state.offline ? "error" : data.stale ? "stale" : "ready";
+  live.classList.toggle("is-new", isNew && !data.stale);
+  byId("live-label").textContent = state.offline ? "Offline" : data.stale ? "Delayed"
+    : `${isNew ? "New " : ""}${singaporeClock(latestReading)} reading`;
+  byId("live-detail").textContent = state.offline ? "showing the last loaded readings"
+    : data.stale ? `showing the ${singaporeClock(data.readingAt)} reading` : `checked ${relativeTime(data.fetchedAt)}`;
+}
+
+/* ---------- 24-hour trends ---------- */
+
+const sparkState = new Map();
+
+function seriesFor(metric) {
+  return (state.history?.[metric] ?? [])
+    .map(point => ({ ...point, t: Date.parse(point.at) }))
+    .filter(point => Number.isFinite(point.t) && REGIONS.every(key => Number.isFinite(point[key])));
+}
+
+function renderTrends() {
+  const { metric } = state;
+  const config = METRICS[metric];
+  const all = seriesFor(metric);
+  const end = all.at(-1)?.t;
+  const series = end ? all.filter(point => point.t >= end - DAY) : [];
+  const values = series.flatMap(point => REGIONS.map(key => point[key]));
+  const min = Math.min(...values), max = Math.max(...values);
+  const pad = Math.max((max - min) * 0.12, metric === "psi" ? 4 : 6);
+  const domain = [Math.max(0, min - pad), max + pad];
+
+  for (const key of REGIONS) {
+    const card = cards.get(key);
+    const spark = card.querySelector(".spark");
+    const points = series.map(point => ({ t: point.t, v: point[key] }));
+    sparkState.set(key, { points, index: points.length - 1, metric });
+    setText(card, ".spark-end-label", points.length ? singaporeClock(points.at(-1).t) : "");
+    if (points.length < 2) {
+      spark.replaceChildren(Object.assign(document.createElement("div"), { className: "spark-empty", textContent: state.history ? "Trend appears after a few hourly readings" : "Loading trend" }));
+      spark.setAttribute("aria-label", `${regionName(key)} ${config.label} trend is not available yet.`);
+      setText(card, ".reading-change", "");
+      continue;
+    }
+    drawSpark(spark, points, domain, config);
+    const last = points.at(-1);
+    const reference = points.find(point => Math.abs(point.t - (last.t - DAY)) <= 90 * 60_000);
+    const delta = reference ? Math.round((last.v - reference.v) * 10) / 10 : null;
+    setText(card, ".reading-change", delta === null ? "" : delta === 0 ? "No change in 24 hours"
+      : `${delta > 0 ? "Up" : "Down"} ${Math.abs(delta)} in 24 hours`);
+    spark.setAttribute("aria-label", `${regionName(key)} ${config.label} over the last 24 hours, from ${points[0].v} to ${last.v}. Use the left and right arrow keys to read each hour.`);
+  }
+  renderTable(series, metric);
+}
+
+function drawSpark(container, points, [lo, hi], config) {
+  const width = container.clientWidth || 200, height = container.clientHeight || 64;
+  const inset = { top: 8, right: 8, bottom: 4, left: 4 };
+  const start = points.at(-1).t - DAY, end = points.at(-1).t;
+  const x = t => inset.left + ((t - start) / (end - start)) * (width - inset.left - inset.right);
+  const y = v => inset.top + ((hi - v) / (hi - lo || 1)) * (height - inset.top - inset.bottom);
+  const root = svg("svg", { viewBox: `0 0 ${width} ${height}`, "aria-hidden": "true" });
+  const line = points.map((point, i) => `${i ? "L" : "M"}${x(point.t).toFixed(1)} ${y(point.v).toFixed(1)}`).join("");
+  svg("path", { class: "spark-area", d: `${line}L${x(end).toFixed(1)} ${height}L${x(points[0].t).toFixed(1)} ${height}Z` }, root);
+  svg("path", { class: "spark-line", d: line }, root);
+  const last = points.at(-1);
+  svg("circle", { class: "spark-end", cx: x(last.t), cy: y(last.v), r: 4 }, root);
+  const cursor = svg("g", { class: "spark-cursor-group", visibility: "hidden" }, root);
+  svg("line", { class: "spark-cursor", y1: 0, y2: height }, cursor);
+  svg("circle", { class: "spark-cursor-dot", r: 4 }, cursor);
+  const tip = Object.assign(document.createElement("div"), { className: "spark-tip", hidden: true });
+  container.replaceChildren(root, tip);
+  container.sparkGeometry = { x, y, cursor, tip, config, width };
+}
+
+function showSparkPoint(key, index) {
+  const card = cards.get(key);
+  const spark = card.querySelector(".spark");
+  const entry = sparkState.get(key);
+  const geometry = spark.sparkGeometry;
+  if (!geometry || !entry?.points.length) return;
+  entry.index = Math.max(0, Math.min(entry.points.length - 1, index));
+  const point = entry.points[entry.index];
+  const px = geometry.x(point.t), py = geometry.y(point.v);
+  geometry.cursor.setAttribute("visibility", "visible");
+  geometry.cursor.firstChild.setAttribute("x1", px);
+  geometry.cursor.firstChild.setAttribute("x2", px);
+  geometry.cursor.lastChild.setAttribute("cx", px);
+  geometry.cursor.lastChild.setAttribute("cy", py);
+  const value = document.createElement("strong");
+  value.textContent = formatValue(entry.metric, point.v);
+  geometry.tip.replaceChildren(value, singaporeClock(point.t));
+  geometry.tip.hidden = false;
+  geometry.tip.style.left = `${Math.max(48, Math.min(geometry.width - 48, px))}px`;
+  return point;
+}
+
+function hideSparkPoint(key) {
+  const geometry = cards.get(key).querySelector(".spark").sparkGeometry;
+  if (!geometry) return;
+  geometry.cursor.setAttribute("visibility", "hidden");
+  geometry.tip.hidden = true;
+}
+
+for (const [key, card] of cards) {
+  const spark = card.querySelector(".spark");
+  spark.addEventListener("pointermove", event => {
+    const entry = sparkState.get(key);
+    const geometry = spark.sparkGeometry;
+    if (!entry?.points.length || !geometry) return;
+    const px = event.clientX - spark.getBoundingClientRect().left;
+    let nearest = 0;
+    entry.points.forEach((point, i) => { if (Math.abs(geometry.x(point.t) - px) < Math.abs(geometry.x(entry.points[nearest].t) - px)) nearest = i; });
+    showSparkPoint(key, nearest);
+  });
+  spark.addEventListener("pointerleave", () => { if (document.activeElement !== spark) hideSparkPoint(key); });
+  spark.addEventListener("focus", () => showSparkPoint(key, sparkState.get(key)?.index ?? 0));
+  spark.addEventListener("blur", () => hideSparkPoint(key));
+  spark.addEventListener("keydown", event => {
+    const entry = sparkState.get(key);
+    if (!entry?.points.length) return;
+    const moves = { ArrowLeft: entry.index - 1, ArrowRight: entry.index + 1, Home: 0, End: entry.points.length - 1 };
+    if (event.key === "Escape") { hideSparkPoint(key); return; }
+    if (!(event.key in moves)) return;
+    event.preventDefault();
+    const point = showSparkPoint(key, moves[event.key]);
+    if (point) announce(`${singaporeClock(point.t)}: ${formatValue(entry.metric, point.v)}`);
+  });
+}
+
+function renderTable(series, metric) {
+  const config = METRICS[metric];
+  byId("history-caption").textContent = `${config.label}${metric === "pm25" ? " (µg/m³)" : ""} by hour, Singapore time`;
+  byId("history-body").replaceChildren(...[...series].reverse().map(point => {
+    const row = document.createElement("tr");
+    const hour = document.createElement("th");
+    hour.scope = "row";
+    hour.textContent = singaporeClock(point.t);
+    row.append(hour, ...REGIONS.map(key => Object.assign(document.createElement("td"), { textContent: point[key] })));
+    return row;
+  }));
+}
+
+/* ---------- Loading ---------- */
+
+function validSnapshot(data) {
+  return Array.isArray(data?.regions) && data.regions.length === 5 &&
+    REGIONS.every(key => data.regions.some(r => r.key === key && Number.isInteger(r.psi) && r.psi >= 0)) &&
+    Number.isFinite(Date.parse(data.readingAt)) && Number.isFinite(Date.parse(data.sourceUpdatedAt)) && Number.isFinite(Date.parse(data.fetchedAt));
+}
+
+async function loadHistory(key) {
+  try {
+    const response = await fetch("/api/history", { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error("History unavailable");
+    const history = await response.json();
+    if (!Array.isArray(history.psi) || !Array.isArray(history.pm25)) throw new Error("Invalid history");
+    state.history = history;
+    state.historyKey = key;
+  } catch {
+    state.history ??= { psi: [], pm25: [] };
+  }
+  renderTrends();
 }
 
 async function load() {
-  if (loading) return;
-  loading = true;
-  byId("refresh-button").disabled = true;
-  byId("refresh-button").classList.add("is-loading");
-  byId("refresh-label").textContent = "Refreshing";
-  byId("readings").setAttribute("aria-busy", "true");
+  if (state.loading) return;
+  state.loading = true;
+  const button = byId("refresh-button");
+  button.disabled = true;
+  button.classList.add("is-loading");
+  byId("refresh-label").textContent = "Checking";
+  byId("regions").setAttribute("aria-busy", "true");
   try {
     const response = await fetch("/api/psi", { cache: "no-store", signal: AbortSignal.timeout(15_000) });
     if (!response.ok) throw new Error("Readings unavailable");
     const data = await response.json();
-    if (!Array.isArray(data.regions) || data.regions.length !== 5 || REGIONS.some(key => !data.regions.some(r => r.key === key && Number.isInteger(r.psi) && r.psi >= 0)) || !Number.isFinite(Date.parse(data.readingAt)) || !Number.isFinite(Date.parse(data.sourceUpdatedAt))) {
-      throw new Error("Invalid readings");
-    }
-    snapshot = data;
-    render(data);
+    if (!validSnapshot(data)) throw new Error("Invalid readings");
+    const readingKey = `${data.readingAt}|${validPm25(data.pm25) ? data.pm25.readingAt : ""}`;
+    const previous = state.data && `${state.data.readingAt}|${validPm25(state.data.pm25) ? state.data.pm25.readingAt : ""}`;
+    state.data = data;
+    state.offline = false;
+    if (previous && previous !== readingKey) markNewReading();
+    render();
+    if (state.historyKey !== readingKey) loadHistory(readingKey);
   } catch {
-    notice(snapshot ? "Unable to check for an update. Showing the last loaded readings below; check their reading time." : "NEA readings are temporarily unavailable. Select Refresh readings to try again.");
-    byId("feed-state").dataset.state = "stale";
-    byId("feed-label").textContent = snapshot ? "Saved reading · connection unavailable" : "Readings unavailable";
-    if (!snapshot) for (const card of cards.values()) for (const badge of card.querySelectorAll(".category-badge")) badge.textContent = "Unavailable";
+    state.offline = Boolean(state.data);
+    if (state.data) {
+      byId("notice").textContent = "Couldn’t reach Hazey to check for updates. Showing the last loaded readings; check their reading time.";
+      byId("notice").hidden = false;
+      renderLive();
+    } else {
+      byId("live").dataset.state = "error";
+      byId("live-label").textContent = "Readings unavailable";
+      byId("verdict-headline").textContent = "Readings are unavailable right now";
+      byId("verdict-detail").textContent = "NEA readings could not be loaded. Select Check for updates to try again.";
+      for (const card of cards.values()) {
+        card.classList.remove("is-loading");
+        setText(card, ".reading-value", "—");
+        setBadge(card.querySelector(".primary-badge"), category(NaN));
+      }
+    }
   } finally {
-    loading = false;
-    byId("refresh-button").disabled = false;
-    byId("refresh-button").classList.remove("is-loading");
-    byId("refresh-label").textContent = "Refresh readings";
-    byId("readings").setAttribute("aria-busy", "false");
+    state.loading = false;
+    button.disabled = false;
+    button.classList.remove("is-loading");
+    byId("refresh-label").textContent = "Check for updates";
+    byId("regions").setAttribute("aria-busy", "false");
   }
 }
+
+function markNewReading() {
+  state.newUntil = Date.now() + 12_000;
+  for (const card of cards.values()) {
+    card.classList.remove("is-new");
+    void card.offsetWidth;
+    card.classList.add("is-new");
+  }
+  announce("New NEA readings loaded.");
+  setTimeout(renderLive, 12_100);
+}
+
+/* ---------- Controls ---------- */
+
+const metricSwitch = byId("metric-switch");
+function setMetric(metric, focus = false) {
+  state.metric = metric;
+  storage.set("hazey-metric", metric);
+  metricSwitch.dataset.metric = metric;
+  for (const button of metricSwitch.querySelectorAll("button")) {
+    const selected = button.dataset.metric === metric;
+    button.setAttribute("aria-checked", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    if (selected && focus) button.focus();
+  }
+  render();
+}
+metricSwitch.addEventListener("click", event => {
+  const button = event.target.closest("button[data-metric]");
+  if (button) setMetric(button.dataset.metric);
+});
+metricSwitch.addEventListener("keydown", event => {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  setMetric(state.metric === "psi" ? "pm25" : "psi", true);
+});
+
+const root = document.documentElement;
+const isDark = () => (root.dataset.theme ?? (darkScheme.matches ? "dark" : "light")) === "dark";
+function syncThemeButton() {
+  const label = isDark() ? "Use light theme" : "Use dark theme";
+  byId("theme-toggle").setAttribute("aria-label", label);
+  byId("theme-toggle").title = label;
+  document.querySelector('meta[name="theme-color"]').content = getComputedStyle(root).getPropertyValue("--paper").trim();
+}
+byId("theme-toggle").addEventListener("click", () => {
+  const next = isDark() ? "light" : "dark";
+  root.dataset.theme = next;
+  storage.set("hazey-theme", next);
+  syncThemeButton();
+});
+darkScheme.addEventListener("change", syncThemeButton);
 
 byId("refresh-button").addEventListener("click", load);
 byId("telegram-copy").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText("/psi");
-    byId("telegram-copy").textContent = "Copied /psi ✓";
-    byId("copy-status").textContent = "Copied /psi to your clipboard.";
-    setTimeout(() => { byId("telegram-copy").textContent = "Copy /psi ↗"; }, 2500);
+    byId("telegram-copy").textContent = "Copied /psi";
+    announce("Copied /psi to your clipboard.");
+    setTimeout(() => { byId("telegram-copy").textContent = "Copy /psi"; }, 2500);
   } catch {
-    byId("copy-status").textContent = "Copy unavailable. Type /psi in Telegram.";
+    announce("Copy unavailable. Type /psi in Telegram.");
     byId("telegram-copy").textContent = "Type /psi in Telegram";
   }
 });
+
+let resizeFrame = 0;
+const resizeObserver = new ResizeObserver(() => {
+  cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(() => { placeMapLabels(); if (state.data) renderTrends(); });
+});
+for (const element of [map, byId("regions")]) resizeObserver.observe(element);
+
+buildMap();
+setMetric(state.metric);
+syncThemeButton();
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 setInterval(() => { if (!document.hidden) load(); }, 60_000);
+setInterval(renderLive, 20_000);
 load();
