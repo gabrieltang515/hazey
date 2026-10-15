@@ -4,7 +4,7 @@ Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live
 
 ## PM2.5 overview and haze shelter finder — live since 15 October 2026, 18:46 SGT
 
-The owner asked for the nearest haze shelters and an overview of 1-hour PM2.5 over the last 24 hours, reviewed the local build, and approved deployment. The source is on branch `shelters-and-pm25-overview` (based on `activate-channel-broadcasts`), pushed to GitHub; neither branch is merged into `main` yet.
+The owner asked for the nearest haze shelters and an overview of 1-hour PM2.5 over the last 24 hours, reviewed the local build, and approved deployment. It was built on branch `shelters-and-pm25-overview` (based on `activate-channel-broadcasts`); both branches were fast-forwarded into `main` on 15 October 2026, so `main` matches the deployed version `19bbb6bc`.
 
 - **PM2.5 overview** (`#overview`, `renderOverview` in `public/app.js`): an HTML table, five regions by 25 hourly columns, from the existing `/api/history` PM2.5 series (no new data source). Cells use NEA's PM2.5 band tones at stepped tints (`--heat-1`…`--heat-4` in `styles.css`; OKLab lightness gaps ≥ 0.07 between bands, ink ≥ 4.6:1 on every step in both themes) with the value printed in each cell on wide screens. Hover, tap or arrow keys show a readout; a summary line gives the peak and how many hours reached High or above. The table is the accessible twin.
 - **Shelter finder** (`#shelters`): the five nearest of 341 community haze shelters from the People's Association list (as at September 2026), by device location or postal code, with straight-line distance and a Google Maps directions link. Location is used only in the browser (`public/geo.js`); `Permissions-Policy` now allows `geolocation=(self)`. Postal codes go through the new `GET /api/postal?code=NNNNNN` (`src/postal.js`), which calls OneMap's free search API and never stores or logs the code (400 bad input, 404 unknown, 502 OneMap failure). The CSP is unchanged.
@@ -56,8 +56,7 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-1. **Merge into `main`** when the owner is ready: `main` is still at `658a04f`; `activate-channel-broadcasts` (handover record) and `shelters-and-pm25-overview` (this release, deployed) are ahead of it.
-2. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
+1. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
 
 Optional:
 
