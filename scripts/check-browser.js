@@ -52,6 +52,8 @@ async function main() {
       };
       await send("Page.enable", {}, sessionId);
       await send("Emulation.setDeviceMetricsOverride", { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: viewport.name === "mobile" }, sessionId);
+      // Start from a light system theme whatever the host uses, so the theme toggle check is deterministic.
+      await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "light" }] }, sessionId);
       await send("Page.navigate", { url }, sessionId);
       let readings;
       for (let attempt = 0; attempt < 40; attempt++) {
@@ -86,6 +88,48 @@ async function main() {
       assert.match(layout.time, /SGT/);
       assert.match(layout.pm25Time, /SGT/);
       assert.equal(layout.refreshDisabled, false);
+
+      const overview = await evaluate("({ hidden: document.getElementById('heat').hidden, rows: Array.from(document.querySelectorAll('#heat-table tbody tr'), row => row.querySelectorAll('td').length), banded: document.querySelectorAll('#heat-table td:not([data-band=unknown])').length, summary: document.getElementById('overview-summary').textContent })");
+      if (trends.charts === 5) {
+        assert.ok(!overview.hidden && overview.rows.length === 5 && overview.rows.every(cells => cells === 25), `${viewport.name}: PM2.5 overview has five regions by 25 hours`);
+        assert.ok(overview.banded >= 100, `${viewport.name}: most overview cells carry a PM2.5 band`);
+        assert.match(overview.summary, /^Highest: \d+(\.\d+)? µg\/m³/);
+        await evaluate("document.getElementById('heat').focus()");
+        await evaluate("document.getElementById('heat').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))");
+        const tip = await evaluate("({ hidden: document.getElementById('heat-tip').hidden, text: document.getElementById('heat-tip').textContent, active: document.querySelectorAll('#heat-table td.is-active').length })");
+        assert.ok(!tip.hidden && tip.active === 1 && /µg\/m³|No reading/.test(tip.text), `${viewport.name}: overview cells read out on keyboard focus`);
+        await evaluate("document.getElementById('heat').blur()");
+      } else {
+        assert.ok(overview.hidden, `${viewport.name}: overview waits for history`);
+      }
+
+      // Shelter finder: device location (emulated at 572 Hougang St 51), then postal code and bad input.
+      await send("Browser.grantPermissions", { permissions: ["geolocation"], origin: new URL(url).origin });
+      await send("Emulation.setGeolocationOverride", { latitude: 1.37827, longitude: 103.88749, accuracy: 30 }, sessionId);
+      const shelters = async () => {
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const result = await evaluate("({ busy: document.getElementById('postal-button').disabled, names: Array.from(document.querySelectorAll('.shelter-name'), e => e.textContent), distances: Array.from(document.querySelectorAll('.shelter-distance'), e => e.textContent), message: document.getElementById('shelter-message').textContent })");
+          if (!result.busy && result.names.length) return result;
+          await delay(400);
+        }
+        throw new Error(`${viewport.name}: shelter results did not appear`);
+      };
+      await evaluate("document.getElementById('locate-button').click()");
+      const located = await shelters();
+      assert.equal(located.names.length, 5, `${viewport.name}: five nearest shelters`);
+      assert.equal(located.names[0], "Ang Mo Kio-Hougang Pinetree RN");
+      assert.equal(located.distances[0], "Under 100 m");
+      assert.match(located.message, /your location/);
+      await evaluate("document.getElementById('postal-input').value = '12'; document.getElementById('postal-form').requestSubmit()");
+      assert.equal(await evaluate("document.getElementById('postal-input').getAttribute('aria-invalid')"), "true", `${viewport.name}: short postal code is flagged`);
+      assert.match(await evaluate("document.getElementById('shelter-message').textContent"), /six-digit/);
+      await evaluate("document.getElementById('postal-input').value = '089774'; document.getElementById('postal-form').requestSubmit()");
+      const byPostal = await shelters();
+      assert.equal(byPostal.names[0], "Tanjong Pagar CC", `${viewport.name}: postal code lookup finds the nearest shelter`);
+      assert.match(byPostal.message, /postal code 089774/);
+      const shelterLayout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth })");
+      assert.ok(shelterLayout.scrollWidth <= shelterLayout.width, `${viewport.name}: no horizontal overflow with shelter results`);
+
       await evaluate("document.querySelector('.region-card summary').click()");
       assert.equal(await evaluate("document.querySelector('.region-card details').open"), true);
       await evaluate("document.getElementById('refresh-button').click()");
@@ -103,7 +147,7 @@ async function main() {
       const dark = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
       await writeFile(join(tmpdir(), `hazey-${viewport.name}-dark.png`), Buffer.from(dark.data, "base64"));
       await evaluate("document.getElementById('theme-toggle').click()");
-      console.log(`${viewport.name}: ${trends.charts} trend charts (${trends.rows} table rows), map, PSI/PM2.5 switch, dark theme, 5 live readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
+      console.log(`${viewport.name}: ${trends.charts} trend charts (${trends.rows} table rows), ${overview.hidden ? "overview waiting for history" : "PM2.5 overview"}, shelter finder (location, postal code, bad input), map, PSI/PM2.5 switch, dark theme, 5 live readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
       await send("Target.closeTarget", { targetId });
     }
   } finally {

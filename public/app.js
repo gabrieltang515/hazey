@@ -1,8 +1,11 @@
 import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionName, singaporeClock } from "./psi.js";
 import { MAP_VIEWBOX, LAND_PATH, REGION_SHAPES, REGION_LABELS } from "./map-data.js";
+import { SHELTERS, SHELTERS_AS_AT } from "./shelters.js";
+import { nearest, formatDistance } from "./geo.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const DAY = 24 * 60 * 60_000;
+const HOUR = 60 * 60_000;
+const DAY = 24 * HOUR;
 const byId = id => document.getElementById(id);
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const darkScheme = matchMedia("(prefers-color-scheme: dark)");
@@ -223,6 +226,7 @@ function render() {
     byId("telegram-link").hidden = false;
     byId("telegram-copy").hidden = true;
   }
+  renderShelterStatus();
   renderLive();
   renderTrends();
 }
@@ -393,6 +397,243 @@ function renderTable(series, metric) {
   }));
 }
 
+/* ---------- PM2.5 overview: regions by hour ---------- */
+
+const hourFormat = new Intl.DateTimeFormat("en-SG", { timeZone: "Asia/Singapore", hour: "numeric", hour12: true });
+const heat = byId("heat");
+const heatTip = byId("heat-tip");
+const overview = { columns: [], byTime: new Map(), row: 0, column: 0 };
+
+function renderOverview() {
+  const table = byId("heat-table");
+  const series = seriesFor("pm25");
+  const end = series.at(-1)?.t;
+  if (series.length < 2) {
+    overview.columns = [];
+    table.tHead.replaceChildren();
+    table.tBodies[0].replaceChildren();
+    heat.hidden = true;
+    byId("heat-legend").hidden = true;
+    byId("overview-summary").textContent = state.history ? "The last 24 hours of PM2.5 appear after a few hourly readings." : "Loading the last 24 hours";
+    return;
+  }
+  // One column per hour, oldest on the left; hours without a complete reading stay empty.
+  overview.columns = Array.from({ length: 25 }, (_, i) => end - (24 - i) * HOUR);
+  overview.byTime = new Map(series.map(point => [point.t, point]));
+  overview.column = overview.columns.length - 1;
+  overview.row = Math.min(overview.row, REGIONS.length - 1);
+
+  const head = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.scope = "col";
+  corner.className = "heat-corner";
+  corner.append(Object.assign(document.createElement("span"), { className: "sr-only", textContent: "Region" }));
+  head.append(corner, ...overview.columns.map((t, i) => {
+    const th = document.createElement("th");
+    th.scope = "col";
+    const fromEnd = overview.columns.length - 1 - i;
+    th.className = fromEnd % 6 === 0 ? "is-major" : fromEnd % 3 === 0 ? "is-minor" : "is-unlabelled";
+    th.append(Object.assign(document.createElement("span"), { className: "heat-hour", textContent: hourFormat.format(t) }));
+    return th;
+  }));
+  table.tHead.replaceChildren(head);
+
+  const present = new Set();
+  table.tBodies[0].replaceChildren(...REGIONS.map((key, row) => {
+    const tr = document.createElement("tr");
+    const th = Object.assign(document.createElement("th"), { scope: "row", textContent: regionName(key) });
+    tr.append(th, ...overview.columns.map((t, column) => {
+      const value = overview.byTime.get(t)?.[key];
+      const band = pm25Band(value);
+      if (Number.isFinite(value)) present.add(band.key);
+      const td = document.createElement("td");
+      td.dataset.band = band.key;
+      td.dataset.row = row;
+      td.dataset.column = column;
+      td.append(Object.assign(document.createElement("span"), { className: "heat-value", textContent: Number.isFinite(value) ? value : "No reading" }));
+      return td;
+    }));
+    return tr;
+  }));
+  heat.hidden = false;
+
+  byId("heat-legend").hidden = false;
+  byId("heat-legend").replaceChildren(...PM25_BANDS.map(band => {
+    const item = document.createElement("li");
+    item.dataset.band = band.key;
+    item.classList.toggle("is-present", present.has(band.key));
+    const range = Object.assign(document.createElement("span"), { className: "legend-range", textContent: band.range });
+    item.append(`${band.label} (${band.band})`, " ", range);
+    return item;
+  }));
+
+  const readings = overview.columns.flatMap(t => REGIONS.map(key => ({ t, key, value: overview.byTime.get(t)?.[key] })))
+    .filter(reading => Number.isFinite(reading.value));
+  const peak = Math.max(...readings.map(reading => reading.value));
+  const peakAt = readings.filter(reading => reading.value === peak).at(-1).t;
+  const peakWhere = listRegions(REGIONS.filter(key => overview.byTime.get(peakAt)?.[key] === peak));
+  const highHours = overview.columns.filter(t => REGIONS.some(key => ["III", "IV"].includes(pm25Band(overview.byTime.get(t)?.[key]).band))).length;
+  const hours = overview.columns.filter(t => overview.byTime.has(t)).length;
+  const [day, clock] = singaporeClock(peakAt).split(", ");
+  byId("overview-summary").textContent = `Highest: ${peak} µg/m³ (${pm25Band(peak).label.toLowerCase()}) in ${peakWhere} at ${clock ? `${clock} on ${day}` : day}. ` +
+    (highHours ? `High or very high in at least one region in ${highHours} of the last ${hours} hourly readings.`
+      : `Normal or elevated everywhere in the last ${hours} hourly readings.`);
+  hideHeatCell();
+}
+
+function showHeatCell(row, column) {
+  if (!overview.columns.length) return null;
+  overview.row = Math.max(0, Math.min(REGIONS.length - 1, row));
+  overview.column = Math.max(0, Math.min(overview.columns.length - 1, column));
+  const cell = byId("heat-table").tBodies[0].rows[overview.row].cells[overview.column + 1];
+  heat.querySelector("td.is-active")?.classList.remove("is-active");
+  cell.classList.add("is-active");
+  const t = overview.columns[overview.column], key = REGIONS[overview.row];
+  const value = overview.byTime.get(t)?.[key];
+  const strong = document.createElement("strong");
+  strong.textContent = Number.isFinite(value) ? formatValue("pm25", value) : "No reading";
+  const label = `${regionName(key)}, ${singaporeClock(t)}`;
+  heatTip.replaceChildren(strong, Number.isFinite(value) ? `${pm25Band(value).label} · ${label}` : label);
+  heatTip.hidden = false;
+  const box = heat.getBoundingClientRect(), rect = cell.getBoundingClientRect();
+  const half = heatTip.offsetWidth / 2;
+  heatTip.style.left = `${Math.max(half, Math.min(box.width - half, rect.left - box.left + rect.width / 2))}px`;
+  heatTip.style.top = `${rect.top - box.top - 6}px`;
+  return { key, t, value };
+}
+
+function hideHeatCell() {
+  heat.querySelector("td.is-active")?.classList.remove("is-active");
+  heatTip.hidden = true;
+}
+
+function pointHeatCell(event) {
+  const cell = event.target.closest("td[data-column]");
+  if (cell) showHeatCell(Number(cell.dataset.row), Number(cell.dataset.column));
+}
+heat.addEventListener("pointermove", pointHeatCell);
+heat.addEventListener("pointerdown", pointHeatCell);
+// Touch pointers "leave" as soon as the finger lifts, so a tapped reading stays up until the next tap.
+heat.addEventListener("pointerleave", event => { if (event.pointerType !== "touch" && document.activeElement !== heat) hideHeatCell(); });
+heat.addEventListener("focus", () => showHeatCell(overview.row, overview.column));
+heat.addEventListener("blur", hideHeatCell);
+heat.addEventListener("keydown", event => {
+  if (event.key === "Escape") { hideHeatCell(); return; }
+  const moves = {
+    ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowUp: [-1, 0], ArrowDown: [1, 0],
+    Home: [0, -overview.columns.length], End: [0, overview.columns.length]
+  };
+  if (!(event.key in moves) || !overview.columns.length) return;
+  event.preventDefault();
+  const [rows, columns] = moves[event.key];
+  const reading = showHeatCell(overview.row + rows, overview.column + columns);
+  if (reading) announce(`${regionName(reading.key)}, ${singaporeClock(reading.t)}: ${Number.isFinite(reading.value) ? `${formatValue("pm25", reading.value)}, ${pm25Band(reading.value).label}` : "no reading"}`);
+});
+
+/* ---------- Haze shelters ---------- */
+
+const SHELTER_KINDS = { cc: "Community club", rc: "Residents’ Committee centre", rn: "Residents’ Network centre" };
+byId("shelters-meta").textContent = `Air-conditioned rooms at ${SHELTERS.length} community clubs and residents’ centres, from the People’s Association list as at ${SHELTERS_AS_AT}`;
+
+function renderShelterStatus() {
+  const regions = state.data?.regions ?? [];
+  const status = byId("shelter-status");
+  if (!regions.length) return;
+  const highest = Math.max(...regions.map(region => region.psi));
+  const where = listRegions(regions.filter(region => region.psi === highest).map(region => region.key));
+  status.dataset.band = category(highest).key;
+  status.textContent = highest > 300
+    ? `The 24-hour PSI is ${highest} in ${where}, in the Hazardous range. NEA says haze shelters at community clubs stay open until 10 pm.`
+    : highest > 200
+      ? `The 24-hour PSI is ${highest} in ${where}, above 200, the level at which NEA opens haze shelters.`
+      : `NEA opens haze shelters when the 24-hour PSI goes above 200. The highest now is ${highest}, in ${where}.`;
+  byId("shelter-jump").hidden = highest <= 200;
+}
+
+function setShelterMessage(text, results = []) {
+  byId("shelter-message").textContent = text;
+  byId("shelter-list").replaceChildren(...results);
+  byId("shelter-results").classList.toggle("is-empty", !results.length);
+}
+
+function shelterItem(shelter) {
+  const item = Object.assign(document.createElement("li"), { className: "shelter" });
+  const body = Object.assign(document.createElement("div"), { className: "shelter-body" });
+  body.append(
+    Object.assign(document.createElement("h3"), { className: "shelter-name", textContent: shelter.name }),
+    Object.assign(document.createElement("p"), { className: "shelter-address", textContent: `${shelter.address}, Singapore ${shelter.postal}` }),
+    Object.assign(document.createElement("p"), { className: "shelter-kind", textContent: SHELTER_KINDS[shelter.kind] })
+  );
+  const side = Object.assign(document.createElement("div"), { className: "shelter-side" });
+  const link = Object.assign(document.createElement("a"), {
+    className: "shelter-link", textContent: "Directions", target: "_blank", rel: "noopener noreferrer",
+    href: `https://www.google.com/maps/dir/?api=1&destination=${shelter.lat},${shelter.lng}`
+  });
+  link.append(Object.assign(document.createElement("span"), { className: "sr-only", textContent: ` to ${shelter.name} in Google Maps` }));
+  side.append(Object.assign(document.createElement("p"), { className: "shelter-distance", textContent: formatDistance(shelter.km) }), link);
+  item.append(body, side);
+  return item;
+}
+
+function showShelters(origin, label) {
+  const closest = nearest(origin, SHELTERS, 5);
+  setShelterMessage(closest[0].km > 30
+    ? `The nearest shelter is ${formatDistance(closest[0].km)} from ${label}. These shelters are in Singapore only.`
+    : `Nearest to ${label}`, closest.map(shelterItem));
+}
+
+function setFinderBusy(busy) {
+  for (const id of ["locate-button", "postal-button"]) byId(id).disabled = busy;
+}
+
+byId("locate-button").addEventListener("click", () => {
+  if (!navigator.geolocation) {
+    setShelterMessage("This browser can’t share your location. Enter a postal code instead.");
+    return;
+  }
+  setFinderBusy(true);
+  setShelterMessage("Finding your location");
+  navigator.geolocation.getCurrentPosition(position => {
+    setFinderBusy(false);
+    showShelters({ lat: position.coords.latitude, lng: position.coords.longitude }, "your location");
+  }, error => {
+    setFinderBusy(false);
+    setShelterMessage(error.code === error.PERMISSION_DENIED
+      ? "Location access is off for this site. Enter a postal code instead."
+      : "Couldn’t get your location. Try again, or enter a postal code.");
+  }, { enableHighAccuracy: false, timeout: 15_000, maximumAge: 5 * 60_000 });
+});
+
+byId("postal-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = byId("postal-input");
+  const code = input.value.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(code)) {
+    input.setAttribute("aria-invalid", "true");
+    setShelterMessage("Enter a six-digit postal code.");
+    input.focus();
+    return;
+  }
+  input.removeAttribute("aria-invalid");
+  setFinderBusy(true);
+  setShelterMessage(`Looking up ${code}`);
+  try {
+    const response = await fetch(`/api/postal?code=${code}`, { signal: AbortSignal.timeout(12_000) });
+    if (response.status === 404) {
+      setShelterMessage(`Couldn’t find postal code ${code}. Check the number and try again.`);
+      return;
+    }
+    if (!response.ok) throw new Error("Lookup unavailable");
+    const place = await response.json();
+    if (!Number.isFinite(place?.lat) || !Number.isFinite(place?.lng)) throw new Error("Invalid lookup");
+    showShelters(place, `postal code ${code}`);
+  } catch {
+    setShelterMessage("Postal code lookup is unavailable right now. Use your location, or try again shortly.");
+  } finally {
+    setFinderBusy(false);
+  }
+});
+
 /* ---------- Loading ---------- */
 
 function validSnapshot(data) {
@@ -413,6 +654,7 @@ async function loadHistory(key) {
     state.history ??= { psi: [], pm25: [] };
   }
   renderTrends();
+  renderOverview();
 }
 
 async function load() {

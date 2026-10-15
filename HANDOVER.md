@@ -1,6 +1,17 @@
 # Hazey handover
 
-Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg); the dashboard and command bot are unchanged.
+Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 overview and a haze shelter finder are **built and verified locally on branch `shelters-and-pm25-overview` but not deployed**; production still runs the channel release.
+
+## PM2.5 overview and haze shelter finder — built 15 October 2026, not yet deployed
+
+The owner asked for the nearest haze shelters and an overview of 1-hour PM2.5 over the last 24 hours. Both are on branch `shelters-and-pm25-overview` (based on `activate-channel-broadcasts`), pushed to GitHub, awaiting the owner's go-ahead to deploy.
+
+- **PM2.5 overview** (`#overview`, `renderOverview` in `public/app.js`): an HTML table, five regions by 25 hourly columns, from the existing `/api/history` PM2.5 series (no new data source). Cells use NEA's PM2.5 band tones at stepped tints (`--heat-1`…`--heat-4` in `styles.css`; OKLab lightness gaps ≥ 0.07 between bands, ink ≥ 4.6:1 on every step in both themes) with the value printed in each cell on wide screens. Hover, tap or arrow keys show a readout; a summary line gives the peak and how many hours reached High or above. The table is the accessible twin.
+- **Shelter finder** (`#shelters`): the five nearest of 341 community haze shelters from the People's Association list (as at September 2026), by device location or postal code, with straight-line distance and a Google Maps directions link. Location is used only in the browser (`public/geo.js`); `Permissions-Policy` now allows `geolocation=(self)`. Postal codes go through the new `GET /api/postal?code=NNNNNN` (`src/postal.js`), which calls OneMap's free search API and never stores or logs the code (400 bad input, 404 unknown, 502 OneMap failure). The CSP is unchanged.
+- **Shelter status**: the section states NEA's rule (shelters open when the 24-hour PSI is above 200; CC shelters open until 10 pm when Hazardous) against the current highest regional PSI. Above 200, a "Find a haze shelter near you" link appears in the hero.
+- **Data**: `docs/haze-shelters-2026-09.csv` is the PDF transcribed with pdfplumber (five-digit postal codes restored to six digits). `scripts/build-shelters.js` geocodes it via OneMap and writes `public/shelters.js` (46 KB, 11 KB gzipped); it applies three documented corrections where the PDF's address and postal code disagree (Bukit Batok Zone 1 RN, Fernvale Zone K RN, Fernvale Zone H RN) and fails if any entry is unresolved or far from its district. Fernvale Zone K's address and postal code are 0.5 km apart; the street address was trusted. A full run takes about 8 minutes because of OneMap's rate limit.
+- **Verification (local)**: 46/46 Node tests (6 new: shelter data integrity against the CSV, distance maths and formatting, postal endpoint success/validation/404/outage/no-logging, headers), Wrangler dry run, and the browser check against local `wrangler dev` with 25 hours of backfilled history at 1440px and 390px, light and dark. The browser check now also asserts the 5×25 overview and its keyboard readout, the emulated-location search (first result Ang Mo Kio-Hougang Pinetree RN, under 100 m), the postal search (089774 → Tanjong Pagar CC) and the invalid-input message; it now emulates a light system theme so the theme-toggle check passes on a Mac in dark mode. A Hazardous reading (West 305, local DB only) was checked visually for the hero link and shelter status. Screenshots were inspected; band tints were strengthened after the first review.
+- **To deploy**: no migration is needed. From this branch, run `npm test`, `npx wrangler deploy`, then `node scripts/check-browser.js https://hazey.gabrieltang515.workers.dev`. Confirm that `/api/postal?code=089774` returns coordinates from Cloudflare: OneMap rate-limits by IP (HTTP 429 was seen locally while the generator was running), and the page falls back to "use your location" if lookups fail.
 
 ## Channel broadcasts — live since 15 October 2026
 
@@ -44,7 +55,10 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-No required steps remain. Optional:
+1. **Deploy the PM2.5 overview and shelter finder** once the owner approves (see the section above), then verify `/api/postal` from production and record the version here. Merge `activate-channel-broadcasts` and this branch into `main` when the owner is ready.
+2. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
+
+Optional:
 
 1. **Spot-check the first regular slot.** After this haze episode ends (highest regional PSI strictly below 200), confirm the next 02/06/10/14/18/22 SGT post and its `Channel broadcast sent (regular)` log line. Only the breach path has been observed in production so far.
 2. **Show `/pm25` in the bot's command menu.** `/pm25` works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu. It also rotates the webhook secret and redeploys current source, so run `sh scripts/hazey.sh test` first, and restore `wrangler.jsonc` formatting afterwards.

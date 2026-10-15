@@ -2,6 +2,7 @@ import { API_URL, PM25_API_URL, REFRESH_INTERVAL, historyPoints, normalizePm25, 
 import { REGIONS } from "../public/psi.js";
 import { telegramApi } from "./telegram.js";
 import { broadcastChannel } from "./broadcast.js";
+import { lookupPostal, validPostalCode } from "./postal.js";
 
 const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
@@ -193,7 +194,8 @@ async function handleTelegram(request, env, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url);
+    const path = url.pathname;
     try {
       if (path === "/api/psi") {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
@@ -210,6 +212,18 @@ export default {
       if (path === "/api/history") {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
         return json(await history(env));
+      }
+      if (path === "/api/postal") {
+        if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
+        const code = url.searchParams.get("code") ?? "";
+        if (!validPostalCode(code)) return json({ error: "Enter a six-digit Singapore postal code." }, 400);
+        try {
+          const place = await lookupPostal(code);
+          return place ? json(place, 200, { "Cache-Control": "private, max-age=86400" }) : json({ error: "Postal code not found" }, 404);
+        } catch (error) {
+          console.error("Postal code lookup failed:", error.message);
+          return json({ error: "Postal code lookup is unavailable. Please try again shortly." }, 502);
+        }
       }
       if (path === "/telegram/webhook") {
         if (request.method !== "POST") return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
