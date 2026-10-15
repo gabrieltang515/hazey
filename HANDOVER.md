@@ -1,17 +1,18 @@
 # Hazey handover
 
-Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 overview and a haze shelter finder are **built and verified locally on branch `shelters-and-pm25-overview` but not deployed**; production still runs the channel release.
+Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** since 18:46 SGT (version `19bbb6bc-fbcb-4813-af44-5ce157db6ba3`, from branch `shelters-and-pm25-overview`).
 
-## PM2.5 overview and haze shelter finder — built 15 October 2026, not yet deployed
+## PM2.5 overview and haze shelter finder — live since 15 October 2026, 18:46 SGT
 
-The owner asked for the nearest haze shelters and an overview of 1-hour PM2.5 over the last 24 hours. Both are on branch `shelters-and-pm25-overview` (based on `activate-channel-broadcasts`), pushed to GitHub, awaiting the owner's go-ahead to deploy.
+The owner asked for the nearest haze shelters and an overview of 1-hour PM2.5 over the last 24 hours, reviewed the local build, and approved deployment. The source is on branch `shelters-and-pm25-overview` (based on `activate-channel-broadcasts`), pushed to GitHub; neither branch is merged into `main` yet.
 
 - **PM2.5 overview** (`#overview`, `renderOverview` in `public/app.js`): an HTML table, five regions by 25 hourly columns, from the existing `/api/history` PM2.5 series (no new data source). Cells use NEA's PM2.5 band tones at stepped tints (`--heat-1`…`--heat-4` in `styles.css`; OKLab lightness gaps ≥ 0.07 between bands, ink ≥ 4.6:1 on every step in both themes) with the value printed in each cell on wide screens. Hover, tap or arrow keys show a readout; a summary line gives the peak and how many hours reached High or above. The table is the accessible twin.
 - **Shelter finder** (`#shelters`): the five nearest of 341 community haze shelters from the People's Association list (as at September 2026), by device location or postal code, with straight-line distance and a Google Maps directions link. Location is used only in the browser (`public/geo.js`); `Permissions-Policy` now allows `geolocation=(self)`. Postal codes go through the new `GET /api/postal?code=NNNNNN` (`src/postal.js`), which calls OneMap's free search API and never stores or logs the code (400 bad input, 404 unknown, 502 OneMap failure). The CSP is unchanged.
 - **Shelter status**: the section states NEA's rule (shelters open when the 24-hour PSI is above 200; CC shelters open until 10 pm when Hazardous) against the current highest regional PSI. Above 200, a "Find a haze shelter near you" link appears in the hero.
 - **Data**: `docs/haze-shelters-2026-09.csv` is the PDF transcribed with pdfplumber (five-digit postal codes restored to six digits). `scripts/build-shelters.js` geocodes it via OneMap and writes `public/shelters.js` (46 KB, 11 KB gzipped); it applies three documented corrections where the PDF's address and postal code disagree (Bukit Batok Zone 1 RN, Fernvale Zone K RN, Fernvale Zone H RN) and fails if any entry is unresolved or far from its district. Fernvale Zone K's address and postal code are 0.5 km apart; the street address was trusted. A full run takes about 8 minutes because of OneMap's rate limit.
 - **Verification (local)**: 46/46 Node tests (6 new: shelter data integrity against the CSV, distance maths and formatting, postal endpoint success/validation/404/outage/no-logging, headers), Wrangler dry run, and the browser check against local `wrangler dev` with 25 hours of backfilled history at 1440px and 390px, light and dark. The browser check now also asserts the 5×25 overview and its keyboard readout, the emulated-location search (first result Ang Mo Kio-Hougang Pinetree RN, under 100 m), the postal search (089774 → Tanjong Pagar CC) and the invalid-input message; it now emulates a light system theme so the theme-toggle check passes on a Mac in dark mode. A Hazardous reading (West 305, local DB only) was checked visually for the hero link and shelter status. Screenshots were inspected; band tints were strengthened after the first review.
-- **To deploy**: no migration is needed. From this branch, run `npm test`, `npx wrangler deploy`, then `node scripts/check-browser.js https://hazey.gabrieltang515.workers.dev`. Confirm that `/api/postal?code=089774` returns coordinates from Cloudflare: OneMap rate-limits by IP (HTTP 429 was seen locally while the generator was running), and the page falls back to "use your location" if lookups fail.
+- **Deployment (18:46 SGT)**: `npm test` 46/46, then `npx wrangler deploy` produced version **`19bbb6bc-fbcb-4813-af44-5ce157db6ba3`** (no migration; existing secrets, vars, D1 and the `*/5 * * * *` trigger unchanged). Production checks afterwards: `/api/postal` returned OneMap coordinates for 089774 and 530572 from Cloudflare, 404 for 999999 and 400 for 12345; `Permissions-Policy` serves `geolocation=(self)` and the CSP is unchanged; `/`, `/api/psi`, `/api/history`, `/shelters.js`, `/geo.js` and `/app.js` return 200; unauthenticated `POST /telegram/webhook` returns 401. The browser check passed against production at 1440px and 390px (overview 5×25, location and postal shelter searches, bad input, dark theme, no overflow) and the production screenshot was inspected. `wrangler tail` showed the 18:50 scheduled run `ok` with no errors.
+- **Watch**: OneMap rate-limits by IP (HTTP 429 was seen locally while the generator ran). Cloudflare egress worked at deployment; if lookups start failing, `wrangler tail` shows `Postal code lookup failed: OneMap search failed (429)` and the page asks visitors to use their location instead.
 
 ## Channel broadcasts — live since 15 October 2026
 
@@ -55,7 +56,7 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-1. **Deploy the PM2.5 overview and shelter finder** once the owner approves (see the section above), then verify `/api/postal` from production and record the version here. Merge `activate-channel-broadcasts` and this branch into `main` when the owner is ready.
+1. **Merge into `main`** when the owner is ready: `main` is still at `658a04f`; `activate-channel-broadcasts` (handover record) and `shelters-and-pm25-overview` (this release, deployed) are ahead of it.
 2. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
 
 Optional:
@@ -80,7 +81,7 @@ Optional:
 | Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
 | Telegram channel | `@hazey_sg` (`TELEGRAM_CHANNEL_ID` in `wrangler.jsonc` vars; the bot is a channel admin with Post Messages) |
 | D1 migrations applied (production) | `0001`–`0004` |
-| Current deployment version | `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release, 15 Oct 2026 07:09 SGT); previous `5372661b-ac41-4f53-915f-724d2dec1b38` (redesign) |
+| Current deployment version | `19bbb6bc-fbcb-4813-af44-5ce157db6ba3` (PM2.5 overview and shelter finder, 15 Oct 2026 18:46 SGT); previous `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release) |
 | Worker secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEA_API_KEY` |
 
 Cloudflare sign-in was completed successfully through Wrangler OAuth. On 15 October the Mac's Wrangler login had expired and was renewed with `npx wrangler login`; approve the browser page while that command is still waiting, because it times out after about two minutes (approving the Cloudflare dashboard alone does not log Wrangler in). The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
@@ -89,7 +90,7 @@ The public account/database IDs in source are resource identifiers, not credenti
 
 ## Architecture and important behavior
 
-- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), `/api/history` (`{ psi: [...], pm25: [...] }`, each item `{ at, north, south, east, west, central }`, ascending, last 25 hours), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
+- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), `/api/postal?code=` (OneMap postal code to `{ postal, lat, lng }` for the shelter finder, via `src/postal.js`), `/api/history` (`{ psi: [...], pm25: [...] }`, each item `{ at, north, south, east, west, central }`, ascending, last 25 hours), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
 - `src/psi.js` validates and normalizes both NEA responses. PSI requires valid 24-hour PSI values for all five regions and tolerates missing optional 24-hour pollutant fields. PM2.5 requires a non-negative `pm25_one_hourly` concentration for all five regions. Both choose the most recent observation.
 - `public/psi.js` shares PSI category boundaries, NEA 1-hour PM2.5 bands (I Normal 0–55, II Elevated 56–150, III High 151–250, IV Very high ≥251), and SGT formatting between the browser and bot.
 - `public/index.html`, `public/styles.css`, and `public/app.js` implement the buildless dashboard (no framework; shadcn-style design language by hand):
