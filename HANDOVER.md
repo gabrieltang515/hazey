@@ -1,6 +1,29 @@
 # Hazey handover
 
-Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** since 18:46 SGT (version `19bbb6bc-fbcb-4813-af44-5ce157db6ba3`, from branch `shelters-and-pm25-overview`).
+Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** on the dashboard. Since 21:00 SGT (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`), the bot has `/shelter`, channel alerts point to shelters above PSI 200, and the bot menu updates itself; **`/shelter` still needs a real Telegram reply confirmed by the owner** (see Remaining steps).
+
+## Bot shelters, channel shelter pointers and copy fixes — deployed 15 October 2026, 21:00 SGT
+
+Asked for: improvements that keep Singaporeans updated on haze. The owner chose these three from a review of `main`. Built on branch `bot-shelters-and-alerts`, then fast-forwarded into `main`.
+
+- **`/shelter` in `@hazey_sg_bot`** (`src/shelters.js`, `handleTelegram` in `src/worker.js`). It returns the three nearest of the 341 shelters, each with distance, address, kind and an inline "Directions" button, plus an "Open the shelter finder" button and NEA's PSI>200 rule against the saved reading.
+  - **Input:** a location shared in a private chat, or `/shelter <postal code>` (spaces allowed). Plain `/shelter` in a private chat shows a one-time "📍 Share my location" keyboard; in groups it gives the postal-code hint, and shared locations in groups are ignored.
+  - **Lookups:** postal codes use OneMap through `lookupPostal`. If OneMap fails, the bot still replies (offering the location button), and the update is marked sent.
+  - **Privacy:** locations and postal codes are never stored or logged.
+- **Bot command menu** is defined once as `BOT_COMMANDS` in `src/telegram.js` (psi, pm25, shelter, help, start). The scheduled job sends it with `setMyCommands` at minute 10 of every hour, and `scripts/setup-telegram.js` uses the same list. This fixes the missing `/pm25` without rerunning the setup helper or rotating the webhook secret. Only failures are logged (`Bot command menu update failed: …`, never the token).
+- **Channel posts** (`channelMessage` in `src/broadcast.js`): when the highest regional PSI is above 200, posts add a "Haze shelters:" block.
+  - **Contents:** the shared `shelterNotice` text, which mentions the 10 pm community club hours above 300, a link to `<dashboard>/#shelters`, "send /shelter to @hazey_sg_bot", and a "Find a haze shelter" button.
+  - **At 200 or below,** posts are unchanged. Episode logic is untouched.
+- **Shared copy** in `public/psi.js`: `regionList` ("the Central region", "the North and West regions", "all five regions") replaces the dashboard's old "in the Central" wording, and `shelterNotice` is used by the dashboard, bot and channel. `public/geo.js` now also exports `SHELTER_KINDS` and `directionsUrl`.
+- **Accessibility:** the screen-reader live region is now `#announcer` at the top of `<main>`, no longer inside the Telegram panel, so it can't be hidden with that panel.
+- **Verification:**
+  - **Tests:** 53/53 Node tests, 7 new. They cover region wording and the shelter notice at 200/201 and 300/301; `/shelter` by postal code (three nearest, buttons, rule from the saved PSI); private and group locations; bare and invalid `/shelter`; OneMap 429 handling (reply sent, update marked sent, no code or coordinates in logs); `/help`; channel shelter lines above 200, the 10 pm line above 300 and none at 199; and the minute-10 menu sync, including no token and failure without leaking the token.
+  - **Before deploying:** Wrangler dry run (bundle 83 KiB / 22 KiB gzipped, up from 28 KiB because the Worker now includes the shelter list), and the browser check locally at both widths. Screenshots of the new wording were inspected, and sample `/shelter` and channel texts were printed from the real code and reviewed.
+  - **After deploying (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`):**
+    - Endpoints, the `geolocation=(self)` header and the webhook 401 were all correct.
+    - The production browser check passed at both widths.
+    - The 21:00, 21:05 and 21:10 scheduled runs were `ok`. The 21:10 run sent `setMyCommands` and logged no failure.
+  - **Browser check fix:** the first production run hit a race in the check, where the cards' "000" placeholder looked like a loaded reading on a slow response. The check now waits until no card is loading.
 
 ## PM2.5 overview and haze shelter finder — live since 15 October 2026, 18:46 SGT
 
@@ -56,13 +79,18 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-1. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
+1. **Confirm `/shelter` and the menu in Telegram (owner).** From the owner's Telegram account:
+   - Send `/shelter 530572` to `@hazey_sg_bot`. Expect Ang Mo Kio-Hougang Pinetree RN first, under 100 m.
+   - Send plain `/shelter`, tap "📍 Share my location", and check the three shelters are nearby.
+   - Check the command menu shows `/psi`, `/pm25`, `/shelter`, `/help` and `/start`. Telegram clients can cache the menu, so reopen the chat if needed.
+
+   Watch `npx wrangler tail hazey` while testing. Until this is done, don't describe `/shelter` as verified live.
+2. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
 
 Optional:
 
 1. **Spot-check the first regular slot.** After this haze episode ends (highest regional PSI strictly below 200), confirm the next 02/06/10/14/18/22 SGT post and its `Channel broadcast sent (regular)` log line. Only the breach path has been observed in production so far.
-2. **Show `/pm25` in the bot's command menu.** `/pm25` works, but Telegram's menu was set before it existed. Rerunning `sh scripts/hazey.sh telegram https://hazey.gabrieltang515.workers.dev` with the BotFather token refreshes the menu. It also rotates the webhook secret and redeploys current source, so run `sh scripts/hazey.sh test` first, and restore `wrangler.jsonc` formatting afterwards.
-3. **Map data refresh.** `public/map-data.js` uses URA Master Plan 2019; a 2025 edition exists (`d_4ce0038f7ac689652350bb91b7fb92ed`) with more Changi East land. Regenerate rather than hand-edit if the coastline should change.
+2. **Map data refresh.** `public/map-data.js` uses URA Master Plan 2019; a 2025 edition exists (`d_4ce0038f7ac689652350bb91b7fb92ed`) with more Changi East land. Regenerate rather than hand-edit if the coastline should change.
 
 ## Existing Cloudflare resources
 
@@ -80,7 +108,7 @@ Optional:
 | Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
 | Telegram channel | `@hazey_sg` (`TELEGRAM_CHANNEL_ID` in `wrangler.jsonc` vars; the bot is a channel admin with Post Messages) |
 | D1 migrations applied (production) | `0001`–`0004` |
-| Current deployment version | `19bbb6bc-fbcb-4813-af44-5ce157db6ba3` (PM2.5 overview and shelter finder, 15 Oct 2026 18:46 SGT); previous `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release) |
+| Current deployment version | `6eaf95b2-9739-41ed-95c4-4ca54648786b` (bot `/shelter`, channel shelter pointers, menu sync; 15 Oct 2026 21:00 SGT); previous `19bbb6bc-fbcb-4813-af44-5ce157db6ba3` (PM2.5 overview and shelter finder); before that `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release) |
 | Worker secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEA_API_KEY` |
 
 Cloudflare sign-in was completed successfully through Wrangler OAuth. On 15 October the Mac's Wrangler login had expired and was renewed with `npx wrangler login`; approve the browser page while that command is still waiting, because it times out after about two minutes (approving the Cloudflare dashboard alone does not log Wrangler in). The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
@@ -106,7 +134,7 @@ The public account/database IDs in source are resource identifiers, not credenti
 - One refresh fetches PSI and PM2.5 in parallel. Each saves independently: a PM2.5 failure is logged and never blocks or discards a PSI update, and saved PM2.5 survives later PM2.5 failures. The overdue-cache check uses the PSI snapshot age.
 - Snapshot refreshes run every five minutes, including while the page is closed. Browser checks run every minute. Requests also refresh an overdue cache; browser requests return saved data while refreshing, while bot commands can await the refresh.
 - Data is marked stale when the saved fetch is more than 15 minutes old or the observation is more than two hours old. Those are application freshness thresholds, not promises about NEA publication frequency.
-- Telegram commands are `/start`, `/help`, `/psi` and `/psi <region>` (24-hour PSI only), and `/pm25` and `/pm25 <region>` (1-hour PM2.5 only). The owner asked that `/psi` not include PM2.5, and that `/help` list the region form of `/pm25` on its own line. Supported regions are north, south, east, west, central. Command names may contain digits. Mentions addressed to another configured bot are ignored.
+- Telegram commands are `/start`, `/help`, `/psi` and `/psi <region>` (24-hour PSI only), `/pm25` and `/pm25 <region>` (1-hour PM2.5 only), and `/shelter` (location in private chats, or `/shelter <postal code>`); the menu is resent hourly from `BOT_COMMANDS`. The owner asked that `/psi` not include PM2.5, and that `/help` list the region form of `/pm25` on its own line. Supported regions are north, south, east, west, central. Command names may contain digits. Mentions addressed to another configured bot are ignored.
 - The webhook requires `X-Telegram-Bot-Api-Secret-Token`. Successful duplicate updates are ignored; processing updates are retried; failed sends release the record for retry. Deduplication records are pruned after seven days.
 - Telegram `sendMessage` has no idempotency key: an ambiguous network failure after Telegram accepts a message can still produce a duplicate on retry. This limit is documented rather than claiming guaranteed exactly-once delivery.
 

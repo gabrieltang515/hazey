@@ -57,7 +57,8 @@ async function main() {
       await send("Page.navigate", { url }, sessionId);
       let readings;
       for (let attempt = 0; attempt < 40; attempt++) {
-        readings = await evaluate("Array.from(document.querySelectorAll('.reading-value'), e => e.textContent)");
+        // Cards start with a "000" placeholder, so wait until they have finished loading.
+        readings = await evaluate("document.querySelector('.region-card.is-loading') ? null : Array.from(document.querySelectorAll('.reading-value'), e => e.textContent)");
         if (readings?.length === 5 && readings.every(value => /^\d+$/.test(value))) break;
         await delay(500);
       }
