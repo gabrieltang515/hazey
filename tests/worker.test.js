@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 import { broadcastChannel } from "../src/broadcast.js";
+import { ONEMAP_SEARCH_URL } from "../src/postal.js";
 
 function fixture(timestamp = new Date().toISOString()) {
   return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
@@ -40,6 +41,11 @@ function setup(t) {
   };
   const pending = [];
   return { db, env, ctx: { waitUntil(promise) { pending.push(promise); } }, pending };
+}
+
+function telegramMessage(updateId, message) {
+  return new Request("https://hazey.example/telegram/webhook", { method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": "test-secret" },
+    body: JSON.stringify({ update_id: updateId, message: { chat: { id: 1234, type: "private" }, ...message } }) });
 }
 
 function webhook(updateId, command = "/psi", secret = "test-secret") {
@@ -195,6 +201,7 @@ test("/pm25 replies with banded 1-hour PM2.5 only; /psi replies with PSI only; h
   assert.doesNotMatch(replies[1], /µg\/m³|Band/);
   assert.match(replies[2], /1-hour PM2.5 \(µg\/m³\)\n\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
   assert.match(replies[3], /\/pm25 — 1-hour PM2.5, all regions\n\/pm25 north — PM2.5 for one region/);
+  assert.match(replies[3], /\/shelter — nearest haze shelters to your location\n\/shelter 530572 — haze shelters near a postal code/);
 });
 
 function dayFixture(field, hours, values) {
@@ -246,7 +253,11 @@ test("scheduled runs backfill hourly and prune history older than two windows", 
   const scheduledTime = Date.parse("2026-10-14T10:10:00Z");
   db.prepare("INSERT INTO reading_history VALUES ('psi', ?, ?, '{}')").run(scheduledTime - 3 * 24 * 60 * 60_000, scheduledTime - 3 * 24 * 60 * 60_000);
   const urls = [];
-  t.mock.method(globalThis, "fetch", async url => { urls.push(url); return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url); });
+  t.mock.method(globalThis, "fetch", async url => {
+    urls.push(url);
+    if (url.startsWith("https://api.telegram.org/")) return Response.json({ ok: true, result: true });
+    return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url);
+  });
   const pending = [];
   await worker.scheduled({ scheduledTime }, env, { waitUntil(promise) { pending.push(promise); } });
   await Promise.all(pending);
@@ -274,6 +285,7 @@ function channelHarness(t) {
       if (options.pm25Down) return new Response("unavailable", { status: 503 });
       return Response.json(pm25Fixture(options.pm25At ?? new Date(now).toISOString()));
     }
+    if (url.endsWith("/setMyCommands")) return Response.json({ ok: true, result: true });
     assert.ok(url.endsWith("/sendMessage"));
     if (options.telegramDown) return Response.json({ ok: false }, { status: 429 });
     if (options.delivery) await options.delivery;
@@ -467,4 +479,126 @@ test("normal channel advice includes the 100/101 and 300/301 boundaries", async 
   assert.match(messages[2].text, /Healthy.*avoid/i);
   await tick("2026-10-14T11:00:00+08:00", 301, { values: values(301) });
   assert.match(messages[3].text, /Healthy.*minimise outdoor/i);
+});
+
+test("/shelter with a postal code replies with the three nearest shelters, directions and NEA's shelter rule", async t => {
+  const { env, ctx } = setup(t);
+  env.PUBLIC_APP_URL = "https://hazey.example";
+  const replies = [], searches = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url === API_URL || url === PM25_API_URL) return nea(url);
+    if (url.startsWith(ONEMAP_SEARCH_URL)) {
+      searches.push(url);
+      return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.378270724882904", LONGITUDE: "103.8874850986399" }] });
+    }
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  await refreshPsi(env);
+  assert.equal((await worker.fetch(webhook(40, "/shelter 530 572"), env, ctx)).status, 200);
+  const [reply] = replies;
+  assert.match(reply.text, /^Nearest haze shelters to postal code 530572\n\n1\. Ang Mo Kio-Hougang Pinetree RN — Under 100 m\n572 Hougang St 51 #01-31, Singapore 530572\nResidents’ Network centre\n/);
+  assert.equal(reply.text.match(/^\d\. /gm).length, 3);
+  assert.match(reply.text, /The highest now is 200, in the Central region\./);
+  const rows = reply.reply_markup.inline_keyboard;
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0][0].url, "https://www.google.com/maps/dir/?api=1&destination=1.37827,103.88749");
+  assert.equal(rows[3][0].url, "https://hazey.example/#shelters");
+  assert.equal(searches.length, 1);
+});
+
+test("a privately shared location finds shelters; groups ignore locations; bare and invalid /shelter commands guide the user", async t => {
+  const { env, ctx } = setup(t);
+  const replies = [];
+  let searches = 0;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) { searches++; return Response.json({ results: [] }); }
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  const here = { latitude: 1.27617, longitude: 103.84158 }; // Tanjong Pagar CC
+  assert.equal((await worker.fetch(telegramMessage(50, { location: here }), env, ctx)).status, 200);
+  assert.match(replies[0].text, /^Nearest haze shelters to your location\n\n1\. Tanjong Pagar CC — Under 100 m\n/);
+  assert.match(replies[0].text, /\nNEA opens haze shelters when the 24-hour PSI goes above 200\.\n/, "no saved reading: the rule alone");
+  assert.equal(replies[0].reply_markup.inline_keyboard.length, 3);
+  assert.equal((await worker.fetch(telegramMessage(51, { chat: { id: -100, type: "group" }, location: here }), env, ctx)).status, 200);
+  assert.equal(replies.length, 1, "a location in a group gets no reply");
+  await worker.fetch(webhook(52, "/shelter"), env, ctx);
+  assert.equal(replies[1].reply_markup.keyboard[0][0].request_location, true);
+  assert.match(replies[1].text, /isn’t stored/);
+  await worker.fetch(telegramMessage(53, { chat: { id: -100, type: "group" }, text: "/shelter" }), env, ctx);
+  assert.match(replies[2].text, /e\.g\. \/shelter 530572\. To use your location, message me privately\./);
+  assert.equal(replies[2].reply_markup, undefined);
+  await worker.fetch(webhook(54, "/shelter 12345"), env, ctx);
+  assert.match(replies[3].text, /six digits/);
+  assert.equal(searches, 0, "invalid codes never reach OneMap");
+  await worker.fetch(webhook(55, "/shelter 999999"), env, ctx);
+  assert.match(replies[4].text, /Couldn’t find postal code 999999/);
+  assert.equal(searches, 1);
+});
+
+test("postal lookup failures still reply, complete the update, and keep codes and locations out of logs", async t => {
+  const { db, env, ctx } = setup(t);
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) return new Response("busy", { status: 429 });
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  const errors = t.mock.method(console, "error", () => {});
+  const logs = t.mock.method(console, "log", () => {});
+  assert.equal((await worker.fetch(webhook(60, "/shelter 530572"), env, ctx)).status, 200);
+  assert.match(replies[0].text, /unavailable right now\. Share your location instead/);
+  assert.equal(replies[0].reply_markup.keyboard[0][0].request_location, true);
+  assert.equal(db.prepare("SELECT state FROM telegram_updates WHERE update_id = 60").get().state, "sent");
+  assert.equal((await worker.fetch(telegramMessage(61, { location: { latitude: 1.3456, longitude: 103.8765 } }), env, ctx)).status, 200);
+  const logged = [...errors.mock.calls, ...logs.mock.calls].flatMap(call => call.arguments.map(String)).join(" ");
+  assert.doesNotMatch(logged, /530572|1\.3456|103\.8765/);
+  assert.equal(errors.mock.callCount(), 1);
+});
+
+test("channel posts above 200 point to haze shelters, add the 10 pm hours when Hazardous, and omit them at 200 or below", async t => {
+  const { tick, messages } = channelHarness(t);
+  await tick("2026-10-14T15:20:00+08:00", 206);
+  assert.match(messages[0].text, /Haze shelters:\nThe 24-hour PSI is 206 in the West region, above 200, the level at which NEA opens haze shelters\.\nFind the nearest: https:\/\/hazey\.example\/#shelters or send \/shelter to @hazey_psi_bot\nCall the centre before you go/);
+  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#shelters"]);
+  await tick("2026-10-14T16:00:00+08:00", 305);
+  assert.match(messages[1].text, /The 24-hour PSI is 305 in the West region, in the Hazardous range\. NEA says haze shelters at community clubs stay open until 10 pm\./);
+  await tick("2026-10-14T17:00:00+08:00", 199);
+  await tick("2026-10-14T18:00:00+08:00", 199);
+  assert.equal(messages.length, 3);
+  assert.doesNotMatch(messages[2].text, /Haze shelters/);
+  assert.equal(messages[2].reply_markup.inline_keyboard.length, 1);
+});
+
+test("scheduled runs refresh the bot command menu at minute 10 of each hour, only with a token, without logging it", async t => {
+  const { env } = setup(t);
+  const calls = [];
+  let telegramDown = false;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith("https://api.telegram.org/")) {
+      calls.push({ method: url.split("/").pop(), body: JSON.parse(init.body) });
+      return telegramDown ? Response.json({ ok: false }, { status: 401 }) : Response.json({ ok: true, result: true });
+    }
+    return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url);
+  });
+  const run = async iso => {
+    const pending = [];
+    await worker.scheduled({ scheduledTime: Date.parse(iso) }, env, { waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  };
+  await run("2026-10-14T10:10:00Z");
+  assert.deepEqual(calls.map(call => call.method), ["setMyCommands"]);
+  assert.deepEqual(calls[0].body.commands.map(command => command.command), ["psi", "pm25", "shelter", "help", "start"]);
+  await run("2026-10-14T10:15:00Z");
+  assert.equal(calls.length, 1, "only at minute 10");
+  telegramDown = true;
+  const errors = t.mock.method(console, "error", () => {});
+  await run("2026-10-14T11:10:00Z");
+  assert.equal(calls.length, 2);
+  assert.ok(errors.mock.calls.some(call => /Bot command menu update failed: Telegram setMyCommands failed \(401\)/.test(call.arguments.join(" "))));
+  assert.ok(errors.mock.calls.every(call => !call.arguments.join(" ").includes("TEST_TOKEN")));
+  delete env.TELEGRAM_BOT_TOKEN;
+  await run("2026-10-14T12:10:00Z");
+  assert.equal(calls.length, 2, "no token, no call");
 });

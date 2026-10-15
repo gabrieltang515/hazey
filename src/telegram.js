@@ -8,3 +8,12 @@ export async function telegramApi(env, method, body) {
   if (!response.ok || !result.ok) throw new Error(`Telegram ${method} failed (${response.status})`);
   return result.result;
 }
+
+// The bot's command menu. The scheduled job and the setup helper both send this list.
+export const BOT_COMMANDS = [
+  { command: "psi", description: "Latest 24-hour PSI; add a region, e.g. /psi west" },
+  { command: "pm25", description: "Latest 1-hour PM2.5; add a region, e.g. /pm25 west" },
+  { command: "shelter", description: "Nearest haze shelters; share your location or add a postal code" },
+  { command: "help", description: "How to use Hazey" },
+  { command: "start", description: "Welcome and available commands" }
+];

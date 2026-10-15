@@ -36,6 +36,24 @@ export function regionName(key) {
   return key.charAt(0).toUpperCase() + key.slice(1);
 }
 
+// "the West region", "the North and Central regions", "the North, West and Central regions", "all five regions".
+export function regionList(keys) {
+  if (keys.length === REGIONS.length) return "all five regions";
+  const names = keys.map(regionName);
+  const joined = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0];
+  return `the ${joined} region${names.length > 1 ? "s" : ""}`;
+}
+
+// NEA's community haze shelter arrangements (NEA release, 9 October 2026): air-conditioned rooms at community
+// clubs and selected RC and RN centres open when the 24-hour PSI is above 200, and community club shelters stay
+// open until 10 pm when it is Hazardous. `highest` is the highest regional 24-hour PSI, `where` its regionList.
+export function shelterNotice(highest, where) {
+  if (!Number.isFinite(highest)) return "NEA opens haze shelters when the 24-hour PSI goes above 200.";
+  if (highest > 300) return `The 24-hour PSI is ${highest} in ${where}, in the Hazardous range. NEA says haze shelters at community clubs stay open until 10 pm.`;
+  if (highest > 200) return `The 24-hour PSI is ${highest} in ${where}, above 200, the level at which NEA opens haze shelters.`;
+  return `NEA opens haze shelters when the 24-hour PSI goes above 200. The highest now is ${highest}, in ${where}.`;
+}
+
 const sgt = options => new Intl.DateTimeFormat("en-SG", { timeZone: "Asia/Singapore", ...options });
 const fullFormat = sgt({ day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true });
 const clockFormat = sgt({ hour: "numeric", minute: "2-digit", hour12: true });

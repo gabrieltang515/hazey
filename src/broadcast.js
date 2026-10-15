@@ -1,4 +1,4 @@
-import { category, singaporeTime } from "../public/psi.js";
+import { category, regionList, shelterNotice, singaporeTime } from "../public/psi.js";
 import { isStale } from "./psi.js";
 import { telegramApi } from "./telegram.js";
 
@@ -25,7 +25,8 @@ export function healthAdvice(psi) {
   ].join("\n");
 }
 
-export function channelMessage(snapshot, kind, appUrl, now = Date.now()) {
+// Above 200 (NEA's trigger for opening haze shelters) the post also points to the shelter finder.
+export function channelMessage(snapshot, kind, { appUrl = null, botUsername = null } = {}, now = Date.now()) {
   const values = snapshot.regions.map(region => region.psi);
   const low = Math.min(...values), high = Math.max(...values);
   const lowBand = category(low).label, highBand = category(high).label;
@@ -44,6 +45,13 @@ export function channelMessage(snapshot, kind, appUrl, now = Date.now()) {
   }
   lines.push("", "Health advice (based on the highest regional PSI):", healthAdvice(high));
   if (high > 100) lines.push("If you feel unwell, seek medical attention, especially if you are in a vulnerable group.");
+  if (high > 200) {
+    const where = regionList(snapshot.regions.filter(region => region.psi === high).map(region => region.key));
+    const find = [appUrl && new URL("#shelters", appUrl).href, botUsername && `send /shelter to @${botUsername}`].filter(Boolean);
+    lines.push("", "Haze shelters:", shelterNotice(high, where));
+    if (find.length) lines.push(`Find the nearest: ${find.join(" or ")}`);
+    lines.push("Call the centre before you go to confirm the room and its opening hours.");
+  }
   lines.push("", `MOH guidance via NEA: ${ADVISORY_URL}`, "Source: NEA via data.gov.sg");
   if (appUrl) lines.push("", `More readings and trends: ${appUrl}`);
   return lines.join("\n");
@@ -85,9 +93,14 @@ export async function broadcastChannel(env, snapshot, now = Date.now()) {
     const due = (active || regularSlot) && state.last_slot < slot && Date.parse(snapshot.readingAt) >= slot;
     if (breach || due) {
       const appUrl = env.PUBLIC_APP_URL && new URL(env.PUBLIC_APP_URL).protocol === "https:" ? env.PUBLIC_APP_URL : null;
-      const reply = { chat_id: channel, text: channelMessage(snapshot, breach ? "breach" : active ? "hourly" : "regular", appUrl, now),
+      const bot = (env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
+      const botUsername = /^[a-z0-9_]{5,32}$/i.test(bot) ? bot : null;
+      const reply = { chat_id: channel, text: channelMessage(snapshot, breach ? "breach" : active ? "hourly" : "regular", { appUrl, botUsername }, now),
         link_preview_options: { is_disabled: true } };
-      if (appUrl) reply.reply_markup = { inline_keyboard: [[{ text: "View Hazey dashboard", url: appUrl }]] };
+      if (appUrl) {
+        reply.reply_markup = { inline_keyboard: [[{ text: "View Hazey dashboard", url: appUrl }]] };
+        if (high > 200) reply.reply_markup.inline_keyboard.push([{ text: "Find a haze shelter", url: new URL("#shelters", appUrl).href }]);
+      }
       await telegramApi(env, "sendMessage", reply);
       // Only successful delivery consumes a slot or completes the pending first alert.
       await env.PSI_DB.prepare("UPDATE channel_broadcasts SET pending_breach = 0, last_slot = ? WHERE channel_id = ? AND owner = ?")

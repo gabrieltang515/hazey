@@ -1,7 +1,7 @@
-import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionName, singaporeClock } from "./psi.js";
+import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionList, regionName, shelterNotice, singaporeClock } from "./psi.js";
 import { MAP_VIEWBOX, LAND_PATH, REGION_SHAPES, REGION_LABELS } from "./map-data.js";
 import { SHELTERS, SHELTERS_AS_AT } from "./shelters.js";
-import { nearest, formatDistance } from "./geo.js";
+import { SHELTER_KINDS, directionsUrl, nearest, formatDistance } from "./geo.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const HOUR = 60 * 60_000;
@@ -37,7 +37,7 @@ function svg(tag, attributes = {}, parent) {
   return node;
 }
 const setText = (root, selector, text) => { root.querySelector(selector).textContent = text; };
-const announce = message => { byId("copy-status").textContent = message; };
+const announce = message => { byId("announcer").textContent = message; };
 
 /* ---------- Region cards ---------- */
 
@@ -143,8 +143,6 @@ function currentValues(data) {
 }
 
 const formatValue = (metric, value) => `${value}${METRICS[metric].suffix}`;
-const listRegions = keys => keys.length === 5 ? "all five regions"
-  : `the ${keys.map(regionName).join(keys.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, " and $1")}`;
 
 function relativeTime(timestamp) {
   const minutes = Math.round((Date.now() - Date.parse(timestamp)) / 60_000);
@@ -243,7 +241,7 @@ function renderVerdict(values, metric) {
   const bands = REGIONS.map(key => config.band(values[key])).sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
   const [low, high] = [bands[0], bands.at(-1)];
   const highest = Math.max(...REGIONS.map(key => values[key]));
-  const where = listRegions(REGIONS.filter(key => values[key] === highest));
+  const where = regionList(REGIONS.filter(key => values[key] === highest));
   byId("verdict").dataset.band = high.key;
   byId("verdict-headline").textContent = low.key === high.key ? `${high.label} across Singapore`
     : `${low.label} to ${high.label.toLowerCase()} across Singapore`;
@@ -471,7 +469,7 @@ function renderOverview() {
     .filter(reading => Number.isFinite(reading.value));
   const peak = Math.max(...readings.map(reading => reading.value));
   const peakAt = readings.filter(reading => reading.value === peak).at(-1).t;
-  const peakWhere = listRegions(REGIONS.filter(key => overview.byTime.get(peakAt)?.[key] === peak));
+  const peakWhere = regionList(REGIONS.filter(key => overview.byTime.get(peakAt)?.[key] === peak));
   const highHours = overview.columns.filter(t => REGIONS.some(key => ["III", "IV"].includes(pm25Band(overview.byTime.get(t)?.[key]).band))).length;
   const hours = overview.columns.filter(t => overview.byTime.has(t)).length;
   const [day, clock] = singaporeClock(peakAt).split(", ");
@@ -532,7 +530,6 @@ heat.addEventListener("keydown", event => {
 
 /* ---------- Haze shelters ---------- */
 
-const SHELTER_KINDS = { cc: "Community club", rc: "Residents’ Committee centre", rn: "Residents’ Network centre" };
 byId("shelters-meta").textContent = `Air-conditioned rooms at ${SHELTERS.length} community clubs and residents’ centres, from the People’s Association list as at ${SHELTERS_AS_AT}`;
 
 function renderShelterStatus() {
@@ -540,13 +537,9 @@ function renderShelterStatus() {
   const status = byId("shelter-status");
   if (!regions.length) return;
   const highest = Math.max(...regions.map(region => region.psi));
-  const where = listRegions(regions.filter(region => region.psi === highest).map(region => region.key));
+  const where = regionList(regions.filter(region => region.psi === highest).map(region => region.key));
   status.dataset.band = category(highest).key;
-  status.textContent = highest > 300
-    ? `The 24-hour PSI is ${highest} in ${where}, in the Hazardous range. NEA says haze shelters at community clubs stay open until 10 pm.`
-    : highest > 200
-      ? `The 24-hour PSI is ${highest} in ${where}, above 200, the level at which NEA opens haze shelters.`
-      : `NEA opens haze shelters when the 24-hour PSI goes above 200. The highest now is ${highest}, in ${where}.`;
+  status.textContent = shelterNotice(highest, where);
   byId("shelter-jump").hidden = highest <= 200;
 }
 
@@ -567,7 +560,7 @@ function shelterItem(shelter) {
   const side = Object.assign(document.createElement("div"), { className: "shelter-side" });
   const link = Object.assign(document.createElement("a"), {
     className: "shelter-link", textContent: "Directions", target: "_blank", rel: "noopener noreferrer",
-    href: `https://www.google.com/maps/dir/?api=1&destination=${shelter.lat},${shelter.lng}`
+    href: directionsUrl(shelter)
   });
   link.append(Object.assign(document.createElement("span"), { className: "sr-only", textContent: ` to ${shelter.name} in Google Maps` }));
   side.append(Object.assign(document.createElement("p"), { className: "shelter-distance", textContent: formatDistance(shelter.km) }), link);

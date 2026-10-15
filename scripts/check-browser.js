@@ -65,6 +65,9 @@ async function main() {
       assert.ok(readings.every(value => /^\d+$/.test(value)), `${viewport.name}: real readings loaded`);
       const pm25 = await evaluate("Array.from(document.querySelectorAll('.other-value'), e => e.textContent)");
       assert.ok(pm25?.length === 5 && pm25.every(value => /^\d+(\.\d+)? µg\/m³$/.test(value)), `${viewport.name}: five 1-hour PM2.5 readings`);
+      const wording = await evaluate("({ verdict: document.getElementById('verdict-detail').textContent, announcer: Boolean(document.getElementById('announcer')), inPanel: Boolean(document.getElementById('announcer')?.closest('#telegram-panel')) })");
+      assert.ok(wording.announcer && !wording.inPanel, `${viewport.name}: screen-reader announcer sits outside the Telegram panel`);
+      assert.match(wording.verdict, /, in (the .+ regions?|all five regions)\.$/, `${viewport.name}: verdict names regions naturally`);
       const mapBands = await evaluate("Array.from(document.querySelectorAll('.map-region'), e => e.dataset.band)");
       assert.ok(mapBands.length === 5 && mapBands.every(band => band !== "unknown"), `${viewport.name}: map shows five banded regions`);
       for (let attempt = 0; attempt < 20; attempt++) {
@@ -98,6 +101,7 @@ async function main() {
         await evaluate("document.getElementById('heat').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))");
         const tip = await evaluate("({ hidden: document.getElementById('heat-tip').hidden, text: document.getElementById('heat-tip').textContent, active: document.querySelectorAll('#heat-table td.is-active').length })");
         assert.ok(!tip.hidden && tip.active === 1 && /µg\/m³|No reading/.test(tip.text), `${viewport.name}: overview cells read out on keyboard focus`);
+        assert.match(await evaluate("document.getElementById('announcer').textContent"), /µg\/m³|no reading/, `${viewport.name}: keyboard readouts are announced`);
         await evaluate("document.getElementById('heat').blur()");
       } else {
         assert.ok(overview.hidden, `${viewport.name}: overview waits for history`);

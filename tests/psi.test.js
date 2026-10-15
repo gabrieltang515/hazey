@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { category, pm25Band, REGIONS, singaporeTime } from "../public/psi.js";
+import { category, pm25Band, REGIONS, regionList, shelterNotice, singaporeTime } from "../public/psi.js";
 import { historyPoints, normalizePm25, normalizePsi, isStale, telegramReading } from "../src/psi.js";
 import { parseCommand } from "../src/worker.js";
 
@@ -103,4 +103,19 @@ test("history keeps every complete hour and skips malformed ones", () => {
   assert.deepEqual(points[0].values, { north: 110, south: 134, east: 149, west: 153, central: 148 });
   assert.equal(historyPoints(pm25Fixture(), "pm25")[0].values.west, 257);
   assert.throws(() => historyPoints({ code: 24 }, "psi"));
+});
+
+test("region lists read naturally for one, several and all regions", () => {
+  assert.equal(regionList(["central"]), "the Central region");
+  assert.equal(regionList(["north", "central"]), "the North and Central regions");
+  assert.equal(regionList(["north", "west", "central"]), "the North, West and Central regions");
+  assert.equal(regionList(REGIONS), "all five regions");
+});
+
+test("shelter notices follow NEA's 200 and 300 boundaries", () => {
+  assert.equal(shelterNotice(NaN, ""), "NEA opens haze shelters when the 24-hour PSI goes above 200.");
+  assert.equal(shelterNotice(200, "the West region"), "NEA opens haze shelters when the 24-hour PSI goes above 200. The highest now is 200, in the West region.");
+  assert.equal(shelterNotice(201, "the West region"), "The 24-hour PSI is 201 in the West region, above 200, the level at which NEA opens haze shelters.");
+  assert.doesNotMatch(shelterNotice(300, "the West region"), /10 pm/);
+  assert.equal(shelterNotice(301, "all five regions"), "The 24-hour PSI is 301 in all five regions, in the Hazardous range. NEA says haze shelters at community clubs stay open until 10 pm.");
 });

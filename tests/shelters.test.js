@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import worker from "../src/worker.js";
 import { ONEMAP_SEARCH_URL } from "../src/postal.js";
 import { SHELTERS, SHELTERS_AS_AT } from "../public/shelters.js";
-import { distanceKm, formatDistance, nearest } from "../public/geo.js";
+import { SHELTER_KINDS, directionsUrl, distanceKm, formatDistance, nearest } from "../public/geo.js";
 
 const env = { ASSETS: { fetch: async () => new Response("asset") } };
 const ctx = { waitUntil() {} };
@@ -36,6 +36,8 @@ test("distances use the haversine formula and the nearest shelters come first", 
   assert.ok(found[0].km < 0.1);
   assert.ok(found.every((shelter, i) => i === 0 || found[i - 1].km <= shelter.km));
   assert.equal(SHELTERS[0].km, undefined, "the shared list is not modified");
+  assert.ok(SHELTERS.every(shelter => SHELTER_KINDS[shelter.kind]), "every shelter kind has a label");
+  assert.equal(directionsUrl({ lat: 1.27617, lng: 103.84158 }), "https://www.google.com/maps/dir/?api=1&destination=1.27617,103.84158");
 });
 
 test("distances read naturally at every boundary", () => {

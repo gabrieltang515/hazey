@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { BOT_COMMANDS } from "../src/telegram.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const configPath = new URL("../wrangler.jsonc", import.meta.url);
@@ -81,12 +82,7 @@ async function main() {
   await wrangler(["secret", "put", "TELEGRAM_BOT_TOKEN"], token);
   await wrangler(["secret", "put", "TELEGRAM_WEBHOOK_SECRET"], webhookSecret);
   await wrangler(["deploy"]);
-  await api(token, "setMyCommands", { commands: [
-    { command: "psi", description: "Latest 24-hour PSI; add a region, e.g. /psi west" },
-    { command: "pm25", description: "Latest 1-hour PM2.5; add a region, e.g. /pm25 west" },
-    { command: "help", description: "How to use Hazey" },
-    { command: "start", description: "Welcome and available commands" }
-  ] });
+  await api(token, "setMyCommands", { commands: BOT_COMMANDS });
   await api(token, "setWebhook", {
     url: `${url.origin}/telegram/webhook`, secret_token: webhookSecret, allowed_updates: ["message"]
   });

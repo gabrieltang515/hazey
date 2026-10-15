@@ -1,10 +1,11 @@
 import { API_URL, PM25_API_URL, REFRESH_INTERVAL, historyPoints, normalizePm25, normalizePsi, isStale, telegramReading } from "./psi.js";
 import { REGIONS } from "../public/psi.js";
-import { telegramApi } from "./telegram.js";
+import { BOT_COMMANDS, telegramApi } from "./telegram.js";
 import { broadcastChannel } from "./broadcast.js";
 import { lookupPostal, validPostalCode } from "./postal.js";
+import { shelterCommand } from "./shelters.js";
 
-const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
+const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore, and find the nearest haze shelters.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n/shelter — nearest haze shelters to your location\n/shelter 530572 — haze shelters near a postal code\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
 function json(body, status = 200, extraHeaders = {}) {
   return Response.json(body, { status, headers: {
@@ -137,6 +138,14 @@ export function parseCommand(text, botUsername = "") {
   return { command: match[1].toLowerCase(), argument: (match[3] ?? "").trim().toLowerCase() };
 }
 
+// The dashboard link for bot replies; a missing or invalid URL must not break replies.
+function dashboardUrl(env) {
+  try {
+    const url = new URL(env.PUBLIC_APP_URL);
+    return url.protocol === "https:" ? url.href : null;
+  } catch { return null; }
+}
+
 async function handleTelegram(request, env, ctx) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) return json({ error: "Bot is not configured" }, 503);
   if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
@@ -149,10 +158,14 @@ async function handleTelegram(request, env, ctx) {
   if (!Number.isSafeInteger(update?.update_id)) return json({ error: "Invalid update" }, 400);
   const message = update.message;
   if (!Number.isSafeInteger(message?.chat?.id)) return json({ ok: true });
-  const parsed = parseCommand(message.text, env.TELEGRAM_BOT_USERNAME);
+  const isPrivate = message.chat.type === "private";
+  // A location shared in a private chat asks for the nearest shelters; locations in groups are ignored.
+  const { latitude, longitude } = message.location ?? {};
+  const location = isPrivate && Number.isFinite(latitude) && Number.isFinite(longitude) ? { lat: latitude, lng: longitude } : null;
+  const parsed = parseCommand(message.text, env.TELEGRAM_BOT_USERNAME) ?? (location && { command: "shelter", argument: "" });
   if (!parsed) return json({ ok: true });
   const { command, argument } = parsed;
-  if (!["start", "help", "psi", "pm25"].includes(command) && message.chat.type !== "private") return json({ ok: true });
+  if (!["start", "help", "psi", "pm25", "shelter"].includes(command) && !isPrivate) return json({ ok: true });
 
   const now = Date.now();
   const claim = await env.PSI_DB.prepare(
@@ -166,23 +179,22 @@ async function handleTelegram(request, env, ctx) {
   }
 
   try {
-    let text = HELP;
+    const appUrl = dashboardUrl(env);
+    let reply = { text: HELP };
     if (command === "psi" || command === "pm25") {
       if (argument && !REGIONS.includes(argument)) {
-        text = `Choose north, south, east, west, or central.\n\nExample: /${command} west\nAll regions: /${command}`;
+        reply.text = `Choose north, south, east, west, or central.\n\nExample: /${command} west\nAll regions: /${command}`;
       } else {
-        try { text = telegramReading(await latest(env, ctx, true), argument || null, { dataset: command }); }
-        catch { text = `NEA readings are temporarily unavailable and there is no saved reading yet. Please try /${command} again shortly.`; }
+        try { reply.text = telegramReading(await latest(env, ctx, true), argument || null, { dataset: command }); }
+        catch { reply.text = `NEA readings are temporarily unavailable and there is no saved reading yet. Please try /${command} again shortly.`; }
       }
+    } else if (command === "shelter") {
+      // The saved reading only says whether shelters are open; replies never wait for an NEA refresh.
+      const snapshot = await storedSnapshot(env).catch(() => null);
+      reply = await shelterCommand({ location, argument, isPrivate, regions: snapshot && !isStale(snapshot) ? snapshot.regions : null, appUrl });
     }
-    const reply = { chat_id: message.chat.id, text, link_preview_options: { is_disabled: true } };
-    if (env.PUBLIC_APP_URL) {
-      try {
-        const url = new URL(env.PUBLIC_APP_URL);
-        if (url.protocol === "https:") reply.reply_markup = { inline_keyboard: [[{ text: "Open Hazey dashboard ↗", url: url.href }]] };
-      } catch { /* A missing or invalid dashboard URL must not break replies. */ }
-    }
-    await telegramApi(env, "sendMessage", reply);
+    if (!reply.reply_markup && appUrl) reply.reply_markup = { inline_keyboard: [[{ text: "Open Hazey dashboard ↗", url: appUrl }]] };
+    await telegramApi(env, "sendMessage", { chat_id: message.chat.id, link_preview_options: { is_disabled: true }, ...reply });
     await env.PSI_DB.prepare("UPDATE telegram_updates SET state = 'sent' WHERE update_id = ?").bind(update.update_id).run();
     return json({ ok: true });
   } catch (error) {
@@ -243,5 +255,10 @@ export default {
     ]).catch(error => console.error("Scheduled refresh failed:", error.message))
       .then(() => maintainHistory(env, controller.scheduledTime))
       .catch(error => console.error("History maintenance failed:", error.message)));
+    // Keep the bot's command menu current without rerunning the setup helper (which rotates the webhook secret).
+    if (env.TELEGRAM_BOT_TOKEN && new Date(controller.scheduledTime).getUTCMinutes() === 10) {
+      ctx.waitUntil(telegramApi(env, "setMyCommands", { commands: BOT_COMMANDS })
+        .catch(error => console.error("Bot command menu update failed:", error.message)));
+    }
   }
 };

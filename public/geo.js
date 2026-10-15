@@ -1,6 +1,11 @@
-// Straight-line distances for the shelter finder. These run in the browser, so a visitor's
-// location never leaves their device.
+// Shelter finder helpers shared by the dashboard and the Telegram bot. On the dashboard these run in the
+// browser, so a visitor's location never leaves their device.
 const EARTH_DIAMETER_KM = 12_742;
+
+export const SHELTER_KINDS = { cc: "Community club", rc: "Residents’ Committee centre", rn: "Residents’ Network centre" };
+
+// Google Maps directions to a { lat, lng } destination; the starting point is left to the visitor's device.
+export const directionsUrl = place => `https://www.google.com/maps/dir/?api=1&destination=${place.lat},${place.lng}`;
 
 // Haversine distance between two { lat, lng } points.
 export function distanceKm(a, b) {
