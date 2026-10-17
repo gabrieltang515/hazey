@@ -810,3 +810,21 @@ test("scheduled runs prune expired /masks location requests", async t => {
   await Promise.all(pending);
   assert.deepEqual(db.prepare("SELECT chat_id FROM bot_location_requests").all().map(row => row.chat_id), [2]);
 });
+
+test("channel posts point to free N95 masks while distribution is running, at any PSI level, and stop when the list goes stale", async t => {
+  const { tick, messages } = channelHarness(t);
+  t.mock.method(console, "error", () => {});
+  const masks = { cc: ccFile(), vending: vendingFile() };
+  await tick("2026-10-14T05:55:00+08:00", 150, { masks }); // saves the list; nothing is due
+  await tick("2026-10-14T06:00:00+08:00", 150, { masks });
+  assert.equal(messages.length, 1);
+  assert.match(messages[0].text, /\n\nFree N95 masks:\nEligible groups can collect free N95 masks at 4 CC counters and 1 vending machine with stock now\.\nFind one: https:\/\/hazey\.example\/#masks or send \/masks to @hazey_psi_bot\nOfficial list: go\.gov\.sg\/hazemask\n\nMOH guidance/);
+  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#masks"]);
+  await tick("2026-10-14T06:20:00+08:00", 220, { masks });
+  assert.match(messages[1].text, /Haze shelters:[\s\S]*Free N95 masks:/);
+  assert.deepEqual(messages[1].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#shelters", "https://hazey.example/#masks"]);
+  await tick("2026-10-14T07:00:00+08:00", 220, { masksDown: true }); // last saved at 06:20, 40 minutes ago
+  assert.equal(messages.length, 3);
+  assert.doesNotMatch(messages[2].text, /Free N95 masks/);
+  assert.equal(messages[2].reply_markup.inline_keyboard.length, 2);
+});

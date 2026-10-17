@@ -1,5 +1,7 @@
 import { category, regionList, shelterNotice, singaporeTime } from "../public/psi.js";
+import { MASK_SHORT_URL, maskPlaces } from "../public/masks.js";
 import { isStale } from "./psi.js";
+import { loadMasks } from "./mask-data.js";
 import { telegramApi } from "./telegram.js";
 
 const HOUR = 60 * 60_000;
@@ -25,8 +27,9 @@ export function healthAdvice(psi) {
   ].join("\n");
 }
 
-// Above 200 (NEA's trigger for opening haze shelters) the post also points to the shelter finder.
-export function channelMessage(snapshot, kind, { appUrl = null, botUsername = null } = {}, now = Date.now()) {
+// Above 200 (NEA's trigger for opening haze shelters) the post also points to the shelter finder. While free N95
+// masks are being given out (`masks.active`, from loadMasks), it points to the mask finder at any PSI level.
+export function channelMessage(snapshot, kind, { appUrl = null, botUsername = null, masks = null } = {}, now = Date.now()) {
   const values = snapshot.regions.map(region => region.psi);
   const low = Math.min(...values), high = Math.max(...values);
   const lowBand = category(low).label, highBand = category(high).label;
@@ -51,6 +54,12 @@ export function channelMessage(snapshot, kind, { appUrl = null, botUsername = nu
     lines.push("", "Haze shelters:", shelterNotice(high, where));
     if (find.length) lines.push(`Find the nearest: ${find.join(" or ")}`);
     lines.push("Call the centre before you go to confirm the room and its opening hours.");
+  }
+  if (masks?.active) {
+    const find = [appUrl && new URL("#masks", appUrl).href, botUsername && `send /masks to @${botUsername}`].filter(Boolean);
+    lines.push("", "Free N95 masks:", `Eligible groups can collect free N95 masks at ${maskPlaces(masks.inStock)} with stock now.`);
+    if (find.length) lines.push(`Find one: ${find.join(" or ")}`);
+    lines.push(`Official list: ${MASK_SHORT_URL}`);
   }
   lines.push("", `MOH guidance via NEA: ${ADVISORY_URL}`, "Source: NEA via data.gov.sg");
   if (appUrl) lines.push("", `More readings and trends: ${appUrl}`);
@@ -95,11 +104,14 @@ export async function broadcastChannel(env, snapshot, now = Date.now()) {
       const appUrl = env.PUBLIC_APP_URL && new URL(env.PUBLIC_APP_URL).protocol === "https:" ? env.PUBLIC_APP_URL : null;
       const bot = (env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
       const botUsername = /^[a-z0-9_]{5,32}$/i.test(bot) ? bot : null;
-      const reply = { chat_id: channel, text: channelMessage(snapshot, breach ? "breach" : active ? "hourly" : "regular", { appUrl, botUsername }, now),
+      // A mask list that can't be read never blocks the post.
+      const masks = await loadMasks(env, now).catch(() => null);
+      const reply = { chat_id: channel, text: channelMessage(snapshot, breach ? "breach" : active ? "hourly" : "regular", { appUrl, botUsername, masks }, now),
         link_preview_options: { is_disabled: true } };
       if (appUrl) {
         reply.reply_markup = { inline_keyboard: [[{ text: "View Hazey dashboard", url: appUrl }]] };
         if (high > 200) reply.reply_markup.inline_keyboard.push([{ text: "Find a haze shelter", url: new URL("#shelters", appUrl).href }]);
+        if (masks?.active) reply.reply_markup.inline_keyboard.push([{ text: "Find free N95 masks", url: new URL("#masks", appUrl).href }]);
       }
       await telegramApi(env, "sendMessage", reply);
       // Only successful delivery consumes a slot or completes the pending first alert.
