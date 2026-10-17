@@ -134,32 +134,24 @@ async function main() {
       assert.match(byPostal.message, /postal code 089774/);
       const shelterLayout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth })");
       assert.ok(shelterLayout.scrollWidth <= shelterLayout.width, `${viewport.name}: no horizontal overflow with shelter results`);
-      // Free N95 mask points: the searches above also fill the mask list, and a search there fills the shelters.
-      let masks;
-      for (let attempt = 0; attempt < 30; attempt++) {
-        masks = await evaluate("({ status: document.getElementById('mask-status').textContent, message: document.getElementById('mask-message').textContent, names: Array.from(document.querySelectorAll('#mask-list .place-name'), e => e.textContent), badges: Array.from(document.querySelectorAll('#mask-list .badge'), e => e.textContent), jump: !document.getElementById('mask-jump').hidden, eligibility: document.querySelectorAll('#mask-eligibility li').length, official: Boolean(document.querySelector('#masks a[href=\"https://www.gowhere.gov.sg/hazemask\"]')) })");
-        if (!masks.status.startsWith("Loading")) break;
-        await delay(400);
-      }
-      const maskData = await evaluate("fetch('/api/masks', { cache: 'no-store' }).then(response => response.json())");
-      const withStock = maskData.sites.filter(site => site.stock !== "out" && site.stock !== "offline").length;
-      assert.equal(masks.eligibility, 7, `${viewport.name}: eligibility lists seven groups`);
-      assert.ok(masks.official, `${viewport.name}: HazeMaskGoWhere is linked`);
-      assert.equal(masks.jump, maskData.active && !Object.values(maskData.sources).some(source => source?.stale), `${viewport.name}: hero mask link follows distribution`);
-      if (withStock) {
-        assert.equal(masks.names.length, Math.min(5, withStock), `${viewport.name}: nearest mask points with stock`);
-        assert.ok(masks.badges.every(text => ["In stock", "Limited stock", "Stock unknown"].includes(text)), `${viewport.name}: stock badges`);
+      // Free N95 mask points: shown while distribution is on; the searches above also fill the mask list.
+      const masksActive = (await evaluate("fetch('/api/psi', { cache: 'no-store' }).then(response => response.json())")).masksActive === true;
+      const masks = await evaluate("({ hidden: document.getElementById('masks').hidden, jump: !document.getElementById('mask-jump').hidden, status: document.getElementById('mask-status').textContent, message: document.getElementById('mask-message').textContent, names: Array.from(document.querySelectorAll('#mask-list .place-name'), e => e.textContent), eligibility: document.querySelectorAll('#mask-eligibility li').length, official: Boolean(document.querySelector('#masks a[href=\"https://www.gowhere.gov.sg/hazemask\"]')) })");
+      assert.equal(masks.hidden, !masksActive, `${viewport.name}: mask section follows MASK_DISTRIBUTION`);
+      assert.equal(masks.jump, masksActive, `${viewport.name}: hero mask link follows MASK_DISTRIBUTION`);
+      if (masksActive) {
+        assert.equal(masks.names.length, 5, `${viewport.name}: five nearest mask points`);
         assert.match(masks.message, /postal code 089774/, `${viewport.name}: the shelter search also filled the mask list`);
-      } else {
-        assert.equal(masks.names.length, 0);
-        assert.match(masks.message, /Couldn’t load|None of the listed/, `${viewport.name}: an empty mask list says why`);
+        assert.match(masks.status, /^Locations as at .+ SGT\./, `${viewport.name}: the list says when it was saved`);
+        assert.equal(masks.eligibility, 7, `${viewport.name}: eligibility lists seven groups`);
+        assert.ok(masks.official, `${viewport.name}: HazeMaskGoWhere is linked`);
+        await evaluate("document.getElementById('mask-postal-input').value = '530572'; document.getElementById('mask-postal-form').requestSubmit()");
+        const fromMasks = await shelters();
+        assert.equal(fromMasks.names[0], "Ang Mo Kio-Hougang Pinetree RN", `${viewport.name}: a mask search fills the shelter list too`);
+        assert.match(fromMasks.message, /postal code 530572/);
+        const maskLayout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth })");
+        assert.ok(maskLayout.scrollWidth <= maskLayout.width, `${viewport.name}: no horizontal overflow with mask results`);
       }
-      await evaluate("document.getElementById('mask-postal-input').value = '530572'; document.getElementById('mask-postal-form').requestSubmit()");
-      const fromMasks = await shelters();
-      assert.equal(fromMasks.names[0], "Ang Mo Kio-Hougang Pinetree RN", `${viewport.name}: a mask search fills the shelter list too`);
-      assert.match(fromMasks.message, /postal code 530572/);
-      const maskLayout = await evaluate("({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth })");
-      assert.ok(maskLayout.scrollWidth <= maskLayout.width, `${viewport.name}: no horizontal overflow with mask results`);
 
       await evaluate("document.querySelector('.region-card summary').click()");
       assert.equal(await evaluate("document.querySelector('.region-card details').open"), true);
@@ -178,7 +170,7 @@ async function main() {
       const dark = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true }, sessionId);
       await writeFile(join(tmpdir(), `hazey-${viewport.name}-dark.png`), Buffer.from(dark.data, "base64"));
       await evaluate("document.getElementById('theme-toggle').click()");
-      console.log(`${viewport.name}: ${trends.charts} trend charts (${trends.rows} table rows), ${overview.hidden ? "overview waiting for history" : "PM2.5 overview"}, shelter finder (location, postal code, bad input), mask finder (${masks.names.length} points), map, PSI/PM2.5 switch, dark theme, 5 live readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
+      console.log(`${viewport.name}: ${trends.charts} trend charts (${trends.rows} table rows), ${overview.hidden ? "overview waiting for history" : "PM2.5 overview"}, shelter finder (location, postal code, bad input), mask finder (${masksActive ? `${masks.names.length} points` : "off"}), map, PSI/PM2.5 switch, dark theme, 5 live readings, SGT times, no overflow, details and refresh passed. Screenshot: ${filename}`);
       await send("Target.closeTarget", { targetId });
     }
   } finally {

@@ -1,8 +1,9 @@
-import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionList, regionName, shelterNotice, singaporeClock } from "./psi.js";
+import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionList, regionName, shelterNotice, singaporeClock, singaporeTime } from "./psi.js";
 import { MAP_VIEWBOX, LAND_PATH, REGION_SHAPES, REGION_LABELS } from "./map-data.js";
 import { SHELTERS, SHELTERS_AS_AT } from "./shelters.js";
 import { SHELTER_KINDS, directionsUrl, nearest, formatDistance } from "./geo.js";
-import { MASK_KINDS, MASK_STALE_AFTER, MASK_STOCK, collectable, maskPlaces, stockUpdatedAt } from "./masks.js";
+import { MASK_KINDS, maskCounts, maskPlaces } from "./masks.js";
+import { MASK_SITES, MASK_SITES_AS_AT } from "./mask-sites.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const HOUR = 60 * 60_000;
@@ -29,8 +30,8 @@ const METRICS = {
 const state = {
   data: null, history: null, historyKey: "", loading: false, mapReady: false,
   metric: storage.get("hazey-metric") === "pm25" ? "pm25" : "psi", newUntil: 0,
-  // `masks` is undefined until /api/masks first answers, then null if it never could. `nearby` is the latest search.
-  masks: undefined, masksStale: null, nearby: null
+  // `nearby` is the latest search for haze shelters and mask points.
+  nearby: null
 };
 
 function svg(tag, attributes = {}, parent) {
@@ -228,6 +229,7 @@ function render() {
     byId("telegram-copy").hidden = true;
   }
   renderShelterStatus();
+  renderMasks();
   renderLive();
   renderTrends();
 }
@@ -580,57 +582,24 @@ function showShelters(origin, label) {
     : `Nearest to ${label}`, closest.map(shelter => placeItem(shelter, [SHELTER_KINDS[shelter.kind]])));
 }
 
-const STOCK_TONES = { in: "good", limited: "moderate", unknown: "unknown" };
+byId("masks-meta").textContent = `${maskPlaces(maskCounts(MASK_SITES))}, from HazeMaskGoWhere`;
+byId("mask-status").textContent = `Locations as at ${singaporeTime(MASK_SITES_AS_AT)} SGT. Stock changes through the day, so check live stock on HazeMaskGoWhere before you go.`;
 
-function maskItem(site) {
-  const meta = Object.assign(document.createElement("p"), { className: "place-meta" });
-  const badge = Object.assign(document.createElement("span"), { className: "badge", textContent: MASK_STOCK[site.stock] });
-  badge.dataset.band = STOCK_TONES[site.stock] ?? "unknown";
-  meta.append(badge, MASK_KINDS[site.kind]);
-  return placeItem(site, [site.spot, site.hours].filter(Boolean), meta);
-}
-
-const masksListed = masks => Boolean(masks && (masks.sources.cc || masks.sources.vending));
-// Stale by the server's flag or by the clock here, so a tab left open (or a failing reload) still warns.
-const staleSources = masks => Object.values(masks.sources).filter(source => source && (source.stale || Date.now() - Date.parse(source.fetchedAt) > MASK_STALE_AFTER));
-
+// Shown only while free mask distribution is on (MASK_DISTRIBUTION in the Worker's settings, reported by /api/psi).
 function renderMasks() {
-  const masks = state.masks;
-  const status = byId("mask-status");
-  state.masksStale = masksListed(masks) ? staleSources(masks).length : null;
-  const fresh = Boolean(masks?.active && !staleSources(masks).length);
-  byId("mask-jump").hidden = !fresh;
-  status.dataset.band = fresh ? "good" : "unknown";
-  if (!masksListed(masks)) {
-    status.textContent = "Couldn’t load the mask list right now. HazeMaskGoWhere has the official list of collection points.";
-  } else {
-    const counts = { cc: 0, vending: 0 };
-    for (const site of masks.sites) counts[site.kind]++;
-    byId("masks-meta").textContent = masks.sites.length ? `${maskPlaces(counts)}, from HazeMaskGoWhere` : "Collection points from HazeMaskGoWhere, the government’s mask locator";
-    const stale = staleSources(masks);
-    const updated = singaporeClock(stockUpdatedAt(masks.sources));
-    const open = masks.inStock.cc + masks.inStock.vending;
-    status.textContent = !masks.sites.length ? "No collection points are listed right now."
-      : stale.length
-      ? `Stock may be out of date: Hazey last checked at ${singaporeClock(Math.min(...stale.map(source => Date.parse(source.fetchedAt))))}. Check live stock on HazeMaskGoWhere before you go.`
-      : open ? `Stock updated ${updated}: ${maskPlaces(masks.inStock)} ${open === 1 ? "has" : "have"} masks.`
-      : `Stock updated ${updated}: none of the listed points has masks right now.`;
-  }
-  renderMaskResults();
+  const active = state.data?.masksActive === true;
+  byId("masks").hidden = !active;
+  byId("mask-jump").hidden = !active;
 }
 
 function renderMaskResults() {
-  const { masks, nearby } = state;
+  const { nearby } = state;
   if (nearby?.message) return setResults("mask", nearby.message);
-  if (masks === undefined) return setResults("mask", "Loading mask collection points");
-  if (!masksListed(masks)) return setResults("mask", "Couldn’t load the mask list right now. Check HazeMaskGoWhere for collection points.");
-  if (!masks.sites.length) return setResults("mask", "No collection points are listed right now.");
-  if (!nearby) return setResults("mask", "Your five nearest mask points with stock will appear here.");
-  const closest = nearest(nearby.origin, masks.sites.filter(collectable), 5);
-  if (!closest.length) return setResults("mask", "None of the listed mask points has stock right now.");
+  if (!nearby) return setResults("mask", "Your five nearest mask points will appear here.");
+  const closest = nearest(nearby.origin, MASK_SITES, 5);
   setResults("mask", closest[0].km > 30
     ? `The nearest mask point is ${formatDistance(closest[0].km)} from ${nearby.label}. These points are in Singapore only.`
-    : `Nearest with stock to ${nearby.label}`, closest.map(maskItem));
+    : `Nearest to ${nearby.label}`, closest.map(site => placeItem(site, [MASK_KINDS[site.kind], site.spot, site.hours].filter(Boolean))));
 }
 
 // `nearby` is { message } while a search is busy or after it fails, or { origin, label } once it succeeds.
@@ -713,24 +682,6 @@ function validSnapshot(data) {
   return Array.isArray(data?.regions) && data.regions.length === 5 &&
     REGIONS.every(key => data.regions.some(r => r.key === key && Number.isInteger(r.psi) && r.psi >= 0)) &&
     Number.isFinite(Date.parse(data.readingAt)) && Number.isFinite(Date.parse(data.sourceUpdatedAt)) && Number.isFinite(Date.parse(data.fetchedAt));
-}
-
-function validMasks(data) {
-  return Array.isArray(data?.sites) && typeof data.active === "boolean" && Boolean(data.sources) && Boolean(data.inStock);
-}
-
-// Mask points load on their own; a failure keeps the last loaded list and never affects the readings.
-async function loadMaskPoints() {
-  try {
-    const response = await fetch("/api/masks", { cache: "no-store", signal: AbortSignal.timeout(15_000) });
-    if (!response.ok) throw new Error("Mask points unavailable");
-    const data = await response.json();
-    if (!validMasks(data)) throw new Error("Invalid mask points");
-    state.masks = data;
-  } catch {
-    state.masks ??= null;
-  }
-  renderMasks();
 }
 
 async function loadHistory(key) {
@@ -869,14 +820,7 @@ for (const element of [map, byId("regions")]) resizeObserver.observe(element);
 buildMap();
 setMetric(state.metric);
 syncThemeButton();
-document.addEventListener("visibilitychange", () => { if (!document.hidden) { load(); loadMaskPoints(); } });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 setInterval(() => { if (!document.hidden) load(); }, 60_000);
 setInterval(renderLive, 20_000);
 load();
-loadMaskPoints();
-setInterval(() => { if (!document.hidden) loadMaskPoints(); }, 5 * 60_000);
-// Staleness can pass without a reload; re-render only when it changes so the results list keeps keyboard focus.
-setInterval(() => {
-  const key = masksListed(state.masks) ? staleSources(state.masks).length : null;
-  if (key !== state.masksStale) renderMasks();
-}, 20_000);

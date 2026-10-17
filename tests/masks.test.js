@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizeMaskSites } from "../scripts/mask-data.js";
 import { MASK_SITES, MASK_SITES_AS_AT } from "../public/mask-sites.js";
-import { MASK_KINDS, MASK_STOCK, collectable, maskCounts, maskPlaces, stockUpdatedAt } from "../public/masks.js";
+import { MASK_KINDS, maskCounts, maskPlaces } from "../public/masks.js";
 import { ccFile, maskEntry, vendingFile } from "./mask-fixtures.js";
 
 test("HazeMaskGoWhere entries normalize to sites with kind, hours and spot, without stock; invalid entries are dropped", () => {
@@ -37,12 +37,8 @@ test("a file without a data array is a failed fetch; an empty list is valid", ()
   assert.throws(() => normalizeMaskSites({ data: [null, "x", { name: "No coordinates", address: "1 Road" }] }, "cc"), /No valid HazeMaskGoWhere entries \(0 of 3\)/);
 });
 
-test("shared mask helpers: collectable points, stock time and place counts", () => {
-  assert.deepEqual(["in", "limited", "unknown", "out", "offline"].map(stock => collectable({ stock })), [true, true, true, false, false]);
-  assert.ok(Object.keys(MASK_STOCK).length === 5 && MASK_KINDS.cc === "CC counter" && MASK_KINDS.vending === "Vending machine");
-  assert.equal(stockUpdatedAt({ cc: { updatedAt: "cc" }, vending: { updatedAt: "vending" } }), "vending");
-  assert.equal(stockUpdatedAt({ cc: { updatedAt: "cc" }, vending: null }), "cc");
-  assert.equal(stockUpdatedAt({ cc: null, vending: null }), null);
+test("shared mask helpers: labels and place counts", () => {
+  assert.deepEqual(MASK_KINDS, { cc: "CC counter", vending: "Vending machine" });
   assert.equal(maskPlaces({ cc: 4, vending: 1 }), "4 CC counters and 1 vending machine");
   assert.equal(maskPlaces({ cc: 0, vending: 2 }), "2 vending machines");
   assert.equal(maskPlaces({ cc: 1, vending: 0 }), "1 CC counter");
