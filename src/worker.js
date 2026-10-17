@@ -4,6 +4,7 @@ import { BOT_COMMANDS, telegramApi } from "./telegram.js";
 import { broadcastChannel } from "./broadcast.js";
 import { lookupPostal, validPostalCode } from "./postal.js";
 import { shelterCommand } from "./shelters.js";
+import { loadMasks, refreshMasks } from "./mask-data.js";
 
 const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore, and find the nearest haze shelters.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n/shelter — nearest haze shelters to your location\n/shelter 530572 — haze shelters near a postal code\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
@@ -225,6 +226,10 @@ export default {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
         return json(await history(env));
       }
+      if (path === "/api/masks") {
+        if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
+        return json(await loadMasks(env));
+      }
       if (path === "/api/postal") {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
         const code = url.searchParams.get("code") ?? "";
@@ -255,6 +260,8 @@ export default {
     ]).catch(error => console.error("Scheduled refresh failed:", error.message))
       .then(() => maintainHistory(env, controller.scheduledTime))
       .catch(error => console.error("History maintenance failed:", error.message)));
+    // Mask points refresh on their own: neither a mask nor a PSI outage blocks the other.
+    ctx.waitUntil(refreshMasks(env).catch(error => console.error("Mask site refresh failed:", error.message)));
     // Keep the bot's command menu current without rerunning the setup helper (which rotates the webhook secret).
     if (env.TELEGRAM_BOT_TOKEN && new Date(controller.scheduledTime).getUTCMinutes() === 10) {
       ctx.waitUntil(telegramApi(env, "setMyCommands", { commands: BOT_COMMANDS })

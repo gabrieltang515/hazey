@@ -6,6 +6,8 @@ import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 import { broadcastChannel } from "../src/broadcast.js";
 import { ONEMAP_SEARCH_URL } from "../src/postal.js";
+import { MASK_SOURCES, loadMasks, normalizeMaskSites, refreshMasks, saveMaskSource } from "../src/mask-data.js";
+import { ccFile, vendingFile } from "./mask-fixtures.js";
 
 function fixture(timestamp = new Date().toISOString()) {
   return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
@@ -19,7 +21,11 @@ function pm25Fixture(timestamp = new Date().toISOString()) {
   }] } };
 }
 
-const nea = url => Response.json(url === PM25_API_URL ? pm25Fixture() : fixture());
+// Scheduled runs also fetch HazeMaskGoWhere; by default it lists nothing.
+const EMPTY_MASKS = { lastUpdated: "16 Oct 2026", data: [] };
+const maskSource = url => Object.keys(MASK_SOURCES).find(source => MASK_SOURCES[source] === url);
+const maskFile = (body, modified) => Response.json(body, modified ? { headers: { "Last-Modified": new Date(modified).toUTCString() } } : {});
+const nea = url => maskSource(url) ? Response.json(EMPTY_MASKS) : Response.json(url === PM25_API_URL ? pm25Fixture() : fixture());
 
 function setup(t) {
   const db = new DatabaseSync(":memory:");
@@ -284,6 +290,10 @@ function channelHarness(t) {
     if (url.startsWith(PM25_API_URL)) {
       if (options.pm25Down) return new Response("unavailable", { status: 503 });
       return Response.json(pm25Fixture(options.pm25At ?? new Date(now).toISOString()));
+    }
+    if (maskSource(url)) {
+      if (options.masksDown) return new Response("unavailable", { status: 503 });
+      return Response.json(options.masks?.[maskSource(url)] ?? EMPTY_MASKS);
     }
     if (url.endsWith("/setMyCommands")) return Response.json({ ok: true, result: true });
     assert.ok(url.endsWith("/sendMessage"));
@@ -601,4 +611,90 @@ test("scheduled runs refresh the bot command menu at minute 10 of each hour, onl
   delete env.TELEGRAM_BOT_TOKEN;
   await run("2026-10-14T12:10:00Z");
   assert.equal(calls.length, 2, "no token, no call");
+});
+
+test("mask refreshes save each HazeMaskGoWhere file on its own and never replace a newer saved copy", async t => {
+  const { db, env } = setup(t);
+  const now = Date.parse("2026-10-16T15:00:00Z");
+  let ccResponse = () => maskFile(ccFile(), now - 60 * 60_000), vendingDown = false;
+  t.mock.method(globalThis, "fetch", async url => {
+    if (url === MASK_SOURCES.cc) return ccResponse();
+    if (url === MASK_SOURCES.vending) return vendingDown ? new Response("busy", { status: 503 }) : maskFile(vendingFile(), now - 5 * 60_000);
+    assert.fail(`Unexpected fetch: ${url}`);
+  });
+  const errors = t.mock.method(console, "error", () => {});
+  const rows = () => Object.fromEntries(db.prepare("SELECT * FROM mask_sources").all().map(row => [row.source, row]));
+  await refreshMasks(env, now);
+  assert.equal(JSON.parse(rows().cc.payload).length, 5);
+  assert.equal(JSON.parse(rows().vending.payload).length, 2);
+  assert.equal(rows().vending.source_modified_at, now - 5 * 60_000, "stock time is the file's Last-Modified");
+  assert.deepEqual(errors.mock.calls.map(call => call.arguments.join(" ")), ["Mask site refresh (cc): 5 valid of 7"]);
+
+  vendingDown = true;
+  ccResponse = () => maskFile(ccFile(), now - 2 * 60 * 60_000);
+  await refreshMasks(env, now + 5 * 60_000);
+  assert.equal(rows().vending.fetched_at, now, "a failed fetch keeps the saved copy");
+  assert.equal(rows().cc.fetched_at, now, "an older file never replaces a newer saved one");
+  assert.ok(errors.mock.calls.some(call => call.arguments.join(" ") === "Mask site refresh failed (vending): HazeMaskGoWhere request failed (503)"));
+
+  ccResponse = () => new Response("<!doctype html><title>GoWhere</title>", { headers: { "Content-Type": "text/html" } });
+  await refreshMasks(env, now + 10 * 60_000);
+  assert.equal(rows().cc.fetched_at, now, "a page instead of JSON is a failed fetch");
+  ccResponse = () => maskFile(ccFile());
+  await refreshMasks(env, now + 15 * 60_000);
+  assert.equal(rows().cc.source_modified_at, now + 15 * 60_000, "no Last-Modified: the fetch time stands in");
+});
+
+test("/api/masks serves the saved points, marks a source stale after 30 minutes and says when distribution is running", async t => {
+  const { env, ctx } = setup(t);
+  const masks = async () => (await worker.fetch(new Request("https://hazey.example/api/masks"), env, ctx)).json();
+  assert.deepEqual(await masks(), { sites: [], sources: { cc: null, vending: null }, inStock: { cc: 0, vending: 0 }, active: false });
+  const now = Date.now();
+  await saveMaskSource(env, "cc", normalizeMaskSites(ccFile(), "cc").sites, now - 31 * 60_000, now - 60 * 60_000);
+  await saveMaskSource(env, "vending", normalizeMaskSites(vendingFile(), "vending").sites, now - 60_000, now - 2 * 60_000);
+  const body = await masks();
+  assert.equal(body.sites.length, 7);
+  assert.deepEqual([body.sources.cc.stale, body.sources.vending.stale], [true, false]);
+  assert.equal(body.sources.vending.updatedAt, new Date(now - 2 * 60_000).toISOString());
+  assert.equal(body.sources.cc.fetchedAt, new Date(now - 31 * 60_000).toISOString());
+  assert.deepEqual(body.inStock, { cc: 0, vending: 1 }, "stale sources don't count");
+  assert.equal(body.active, true);
+  assert.equal((await worker.fetch(new Request("https://hazey.example/api/masks", { method: "POST" }), env, ctx)).status, 405);
+
+  const later = now + 60 * 60_000;
+  await saveMaskSource(env, "vending", normalizeMaskSites(vendingFile(), "vending").sites, later - 30 * 60_000, later);
+  assert.equal((await loadMasks(env, later)).sources.vending.stale, false, "exactly 30 minutes is still fresh");
+  assert.equal((await loadMasks(env, later + 1)).active, false, "nothing fresh has stock");
+});
+
+test("scheduled runs refresh mask points alongside PSI, and neither outage blocks the other", async t => {
+  const { db, env } = setup(t);
+  delete env.TELEGRAM_BOT_TOKEN;
+  let masksDown = false, psiDown = false;
+  t.mock.method(globalThis, "fetch", async url => {
+    if (maskSource(url)) {
+      if (masksDown) throw new TypeError("fetch failed");
+      return maskFile(url === MASK_SOURCES.cc ? ccFile() : vendingFile());
+    }
+    if (psiDown) return new Response("unavailable", { status: 503 });
+    return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url);
+  });
+  const errors = t.mock.method(console, "error", () => {});
+  const count = table => db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
+  const run = async () => {
+    const pending = [];
+    await worker.scheduled({ scheduledTime: Date.now() }, env, { waitUntil(promise) { pending.push(promise); } });
+    await Promise.all(pending);
+  };
+  await run();
+  assert.deepEqual([count("mask_sources"), count("psi_snapshot")], [2, 1]);
+  masksDown = true;
+  db.prepare("DELETE FROM psi_snapshot").run();
+  await run();
+  assert.deepEqual([count("mask_sources"), count("psi_snapshot")], [2, 1], "PSI saves during a mask outage, and saved points survive");
+  assert.ok(errors.mock.calls.some(call => call.arguments.join(" ") === "Mask site refresh failed (cc): fetch failed"));
+  masksDown = false; psiDown = true;
+  db.prepare("DELETE FROM mask_sources").run();
+  await run();
+  assert.equal(count("mask_sources"), 2, "masks save during a PSI outage");
 });
