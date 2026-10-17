@@ -147,3 +147,15 @@ Apply `0005_mask_sites.sql` to production D1 before deploying the code. Deploy w
 - A filter between CC counters and vending machines.
 - Showing contact numbers.
 - Any use of the 2025 `data.json` fallback.
+
+## Revision, 17 October 2026: saved list instead of live stock
+
+After deploying version `9aa6fd22`, every production refresh got HTTP 403. HazeMaskGoWhere's CloudFront answers requests from Cloudflare's network with a "forbidden" page whatever the headers; the same requests succeed from an ordinary connection. This is a deliberate block on GovTech's side, and Hazey will not route around it. The owner chose this replacement design:
+
+- **Data:** `scripts/build-mask-sites.js`, run from an ordinary connection, fetches both files, normalizes them with `scripts/mask-data.js` (moved from `src/`, now without stock) and writes `public/mask-sites.js`: `MASK_SITES` (`{ name, kind, address, postal, lat, lng, hours, spot }`) and `MASK_SITES_AS_AT` (ISO time of generation). No stock is stored. Rerun it when HazeMaskGoWhere changes its sites, then redeploy.
+- **Removed:** the five-minute HazeMaskGoWhere fetch, `GET /api/masks`, stock badges and all staleness logic. Migration `0006_drop_mask_sources.sql` drops the unused `mask_sources` table; it is applied after the code that stops using it is deployed. `bot_location_requests` stays.
+- **On/off switch:** `MASK_DISTRIBUTION: "on"` in `wrangler.jsonc` vars. Any other value or no value means off. To end it, remove it and redeploy. `/api/psi` reports it as `masksActive`.
+  - **On:** the dashboard shows `#masks` and the hero link; `/masks` answers from the saved list; channel posts carry the mask block and button.
+  - **Off:** `#masks` and the hero link are hidden; `/masks` (and a location shared after it) says distribution isn't running and links HazeMaskGoWhere; channel posts are unchanged.
+- **Wording:** lists say where they come from and when: "Locations from HazeMaskGoWhere as at `date, time` SGT". Stock is replaced with a prompt to check live stock on HazeMaskGoWhere before going. The channel line drops "with stock now" and ends "Live stock: go.gov.sg/hazemask".
+- **Unchanged:** the shared search, the eligibility box, `/mask`, the 10-minute pending location request, directions, and the HazeMaskGoWhere credit.
