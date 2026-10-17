@@ -4,9 +4,10 @@ import { BOT_COMMANDS, telegramApi } from "./telegram.js";
 import { broadcastChannel } from "./broadcast.js";
 import { lookupPostal, validPostalCode } from "./postal.js";
 import { shelterCommand } from "./shelters.js";
+import { masksCommand } from "./masks.js";
 import { loadMasks, refreshMasks } from "./mask-data.js";
 
-const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore, and find the nearest haze shelters.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n/shelter — nearest haze shelters to your location\n/shelter 530572 — haze shelters near a postal code\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
+const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore, and find the nearest haze shelters and free N95 mask points.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n/shelter — nearest haze shelters to your location\n/shelter 530572 — haze shelters near a postal code\n/masks — free N95 mask points near your location\n/masks 530572 — mask points near a postal code\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
 function json(body, status = 200, extraHeaders = {}) {
   return Response.json(body, { status, headers: {
@@ -147,6 +148,29 @@ function dashboardUrl(env) {
   } catch { return null; }
 }
 
+const LOCATION_REQUEST_TTL = 10 * 60_000;
+
+// A shared location answers plain /masks sent in the last ten minutes; otherwise it finds shelters.
+async function locationCommand(env, chatId) {
+  const request = await env.PSI_DB.prepare("SELECT kind FROM bot_location_requests WHERE chat_id = ? AND expires_at > ?").bind(chatId, Date.now()).first();
+  return request ? "masks" : "shelter";
+}
+
+// Only the chat ID is kept, never a location. Offering the location button for /masks records the request;
+// answering a location, or plain /shelter, clears it so the latest request wins.
+function locationRequest(env, chatId, command, argument, reply) {
+  if (command === "masks" && reply.reply_markup?.keyboard) {
+    return [env.PSI_DB.prepare(
+      "INSERT INTO bot_location_requests (chat_id, kind, expires_at) VALUES (?, 'masks', ?) " +
+      "ON CONFLICT(chat_id) DO UPDATE SET kind = excluded.kind, expires_at = excluded.expires_at"
+    ).bind(chatId, Date.now() + LOCATION_REQUEST_TTL)];
+  }
+  if ((command === "masks" || command === "shelter") && !argument) {
+    return [env.PSI_DB.prepare("DELETE FROM bot_location_requests WHERE chat_id = ?").bind(chatId)];
+  }
+  return [];
+}
+
 async function handleTelegram(request, env, ctx) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) return json({ error: "Bot is not configured" }, 503);
   if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.TELEGRAM_WEBHOOK_SECRET) {
@@ -160,13 +184,14 @@ async function handleTelegram(request, env, ctx) {
   const message = update.message;
   if (!Number.isSafeInteger(message?.chat?.id)) return json({ ok: true });
   const isPrivate = message.chat.type === "private";
-  // A location shared in a private chat asks for the nearest shelters; locations in groups are ignored.
+  // A location shared in a private chat finds shelters, or mask points after plain /masks; locations in groups are ignored.
   const { latitude, longitude } = message.location ?? {};
   const location = isPrivate && Number.isFinite(latitude) && Number.isFinite(longitude) ? { lat: latitude, lng: longitude } : null;
-  const parsed = parseCommand(message.text, env.TELEGRAM_BOT_USERNAME) ?? (location && { command: "shelter", argument: "" });
+  const parsed = parseCommand(message.text, env.TELEGRAM_BOT_USERNAME) ?? (location && { command: await locationCommand(env, message.chat.id), argument: "" });
   if (!parsed) return json({ ok: true });
-  const { command, argument } = parsed;
-  if (!["start", "help", "psi", "pm25", "shelter"].includes(command) && !isPrivate) return json({ ok: true });
+  const { argument } = parsed;
+  const command = parsed.command === "mask" ? "masks" : parsed.command;
+  if (!["start", "help", "psi", "pm25", "shelter", "masks"].includes(command) && !isPrivate) return json({ ok: true });
 
   const now = Date.now();
   const claim = await env.PSI_DB.prepare(
@@ -193,10 +218,17 @@ async function handleTelegram(request, env, ctx) {
       // The saved reading only says whether shelters are open; replies never wait for an NEA refresh.
       const snapshot = await storedSnapshot(env).catch(() => null);
       reply = await shelterCommand({ location, argument, isPrivate, regions: snapshot && !isStale(snapshot) ? snapshot.regions : null, appUrl });
+    } else if (command === "masks") {
+      // The saved HazeMaskGoWhere list; replies never wait for a refresh.
+      const masks = await loadMasks(env).catch(() => null);
+      reply = await masksCommand({ location, argument, isPrivate, masks, appUrl });
     }
     if (!reply.reply_markup && appUrl) reply.reply_markup = { inline_keyboard: [[{ text: "Open Hazey dashboard ↗", url: appUrl }]] };
     await telegramApi(env, "sendMessage", { chat_id: message.chat.id, link_preview_options: { is_disabled: true }, ...reply });
-    await env.PSI_DB.prepare("UPDATE telegram_updates SET state = 'sent' WHERE update_id = ?").bind(update.update_id).run();
+    await env.PSI_DB.batch([
+      env.PSI_DB.prepare("UPDATE telegram_updates SET state = 'sent' WHERE update_id = ?").bind(update.update_id),
+      ...locationRequest(env, message.chat.id, command, argument, reply)
+    ]);
     return json({ ok: true });
   } catch (error) {
     console.error("Telegram reply failed; allowing Telegram to retry this update");
@@ -256,7 +288,8 @@ export default {
   async scheduled(controller, env, ctx) {
     ctx.waitUntil(Promise.all([
       refreshPsi(env, { broadcast: true }).catch(error => console.error("Scheduled refresh or channel broadcast failed:", error.message)),
-      env.PSI_DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(Date.now() - 7 * 24 * 60 * 60_000).run()
+      env.PSI_DB.prepare("DELETE FROM telegram_updates WHERE received_at < ?").bind(Date.now() - 7 * 24 * 60 * 60_000).run(),
+      env.PSI_DB.prepare("DELETE FROM bot_location_requests WHERE expires_at <= ?").bind(Date.now()).run()
     ]).catch(error => console.error("Scheduled refresh failed:", error.message))
       .then(() => maintainHistory(env, controller.scheduledTime))
       .catch(error => console.error("History maintenance failed:", error.message)));

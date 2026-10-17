@@ -14,6 +14,7 @@ export const BOT_COMMANDS = [
   { command: "psi", description: "Latest 24-hour PSI; add a region, e.g. /psi west" },
   { command: "pm25", description: "Latest 1-hour PM2.5; add a region, e.g. /pm25 west" },
   { command: "shelter", description: "Nearest haze shelters; share your location or add a postal code" },
+  { command: "masks", description: "Nearest free N95 mask points; share your location or add a postal code" },
   { command: "help", description: "How to use Hazey" },
   { command: "start", description: "Welcome and available commands" }
 ];

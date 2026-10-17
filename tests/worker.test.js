@@ -208,6 +208,7 @@ test("/pm25 replies with banded 1-hour PM2.5 only; /psi replies with PSI only; h
   assert.match(replies[2], /1-hour PM2.5 \(µg\/m³\)\n\nNorth: 55 — Normal \(Band I\)\nSouth: 56 — Elevated \(Band II\)/);
   assert.match(replies[3], /\/pm25 — 1-hour PM2.5, all regions\n\/pm25 north — PM2.5 for one region/);
   assert.match(replies[3], /\/shelter — nearest haze shelters to your location\n\/shelter 530572 — haze shelters near a postal code/);
+  assert.match(replies[3], /\/masks — free N95 mask points near your location\n\/masks 530572 — mask points near a postal code/);
 });
 
 function dayFixture(field, hours, values) {
@@ -599,7 +600,7 @@ test("scheduled runs refresh the bot command menu at minute 10 of each hour, onl
   };
   await run("2026-10-14T10:10:00Z");
   assert.deepEqual(calls.map(call => call.method), ["setMyCommands"]);
-  assert.deepEqual(calls[0].body.commands.map(command => command.command), ["psi", "pm25", "shelter", "help", "start"]);
+  assert.deepEqual(calls[0].body.commands.map(command => command.command), ["psi", "pm25", "shelter", "masks", "help", "start"]);
   await run("2026-10-14T10:15:00Z");
   assert.equal(calls.length, 1, "only at minute 10");
   telegramDown = true;
@@ -697,4 +698,115 @@ test("scheduled runs refresh mask points alongside PSI, and neither outage block
   db.prepare("DELETE FROM mask_sources").run();
   await run();
   assert.equal(count("mask_sources"), 2, "masks save during a PSI outage");
+});
+
+// Saves the fixture files as if fetched at `fetchedAt`; `edit` changes the normalized sites first.
+async function seedMasks(env, { fetchedAt = Date.now(), edit = sites => sites } = {}) {
+  await saveMaskSource(env, "cc", edit(normalizeMaskSites(ccFile(), "cc").sites), fetchedAt, fetchedAt - 60 * 60_000);
+  await saveMaskSource(env, "vending", edit(normalizeMaskSites(vendingFile(), "vending").sites), fetchedAt, fetchedAt - 5 * 60_000);
+}
+
+test("/masks with a postal code replies with the three nearest mask points with stock, eligibility and the stock time", async t => {
+  const { env, ctx } = setup(t);
+  env.PUBLIC_APP_URL = "https://hazey.example";
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.378270724882904", LONGITUDE: "103.8874850986399" }] });
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  await seedMasks(env);
+  assert.equal((await worker.fetch(webhook(70, "/masks 530572"), env, ctx)).status, 200);
+  const [reply] = replies;
+  assert.match(reply.text, /^Nearest free N95 mask points to postal code 530572\n\n1\. Ci Yuan CC — 600 m\nCC counter • In stock\n51 Hougang Ave 9 #01-01, Singapore 538776\nMonday to Sunday, 10am to 6pm\n\n2\. Buangkok CC — 780 m\n/);
+  assert.match(reply.text, /\n3\. Hougang Bus Interchange — 1\.0 km\nVending machine • Limited stock\n840 Hougang Central, Singapore 538757\nNear Boarding Berth 1\nDaily, 24 hours\n/);
+  assert.doesNotMatch(reply.text, /Punggol CC|Hougang Social Service Office/, "out of stock and out of service are left out");
+  assert.match(reply.text, /Pregnant women, children aged 7 to 16/);
+  assert.match(reply.text, /\nStock from HazeMaskGoWhere, updated .+\. Live stock: go\.gov\.sg\/hazemask$/);
+  const rows = reply.reply_markup.inline_keyboard;
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0][0].text, "Directions: Ci Yuan CC");
+  assert.equal(rows[3][0].url, "https://hazey.example/#masks");
+  await worker.fetch(webhook(71, "/mask 530572"), env, ctx);
+  assert.equal(replies[1].text, reply.text, "/mask is an alias");
+});
+
+test("plain /masks offers the location button and the next shared location finds mask points; otherwise locations find shelters", async t => {
+  const { db, env, ctx } = setup(t);
+  const replies = [];
+  let telegramDown = false;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (telegramDown) return Response.json({ ok: false }, { status: 500 });
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  const errors = t.mock.method(console, "error", () => {});
+  await seedMasks(env);
+  const here = { latitude: 1.37827, longitude: 103.88749 };
+  const pendingRows = () => db.prepare("SELECT count(*) AS n FROM bot_location_requests").get().n;
+  await worker.fetch(webhook(80, "/masks"), env, ctx);
+  assert.equal(replies[0].text, "Share your location to find the 3 nearest free N95 mask points, or send a postal code, e.g. /masks 530572.\n\nYour location is only used to find mask points and isn’t stored.");
+  assert.equal(replies[0].reply_markup.keyboard[0][0].request_location, true);
+  assert.equal(pendingRows(), 1);
+  telegramDown = true;
+  assert.equal((await worker.fetch(telegramMessage(81, { location: here }), env, ctx)).status, 502);
+  assert.equal(pendingRows(), 1, "a failed reply keeps the request for Telegram's retry");
+  telegramDown = false;
+  await worker.fetch(telegramMessage(81, { location: here }), env, ctx);
+  assert.match(replies[1].text, /^Nearest free N95 mask points to your location\n\n1\. Ci Yuan CC — 600 m\n/);
+  assert.equal(pendingRows(), 0, "used once");
+  await worker.fetch(telegramMessage(82, { location: here }), env, ctx);
+  assert.match(replies[2].text, /^Nearest haze shelters to your location/);
+
+  await worker.fetch(webhook(83, "/masks"), env, ctx);
+  await worker.fetch(webhook(84, "/shelter"), env, ctx);
+  assert.equal(pendingRows(), 0, "plain /shelter cancels a pending /masks request");
+  await worker.fetch(telegramMessage(85, { location: here }), env, ctx);
+  assert.match(replies[5].text, /^Nearest haze shelters/);
+
+  await worker.fetch(webhook(86, "/masks"), env, ctx);
+  db.prepare("UPDATE bot_location_requests SET expires_at = ?").run(Date.now() - 1);
+  await worker.fetch(telegramMessage(87, { location: here }), env, ctx);
+  assert.match(replies[7].text, /^Nearest haze shelters/, "an expired request falls back to shelters");
+
+  await worker.fetch(telegramMessage(88, { chat: { id: -100, type: "group" }, text: "/masks" }), env, ctx);
+  assert.equal(replies[8].text, "Send /masks with a postal code, e.g. /masks 530572. To use your location, message me privately.");
+  assert.equal(db.prepare("SELECT count(*) AS n FROM bot_location_requests WHERE chat_id = -100").get().n, 0);
+  assert.ok(errors.mock.calls.every(call => !/1\.37827|103\.88749/.test(call.arguments.join(" "))), "locations never reach the logs");
+});
+
+test("/masks without saved data links HazeMaskGoWhere; stale stock is flagged; empty and out-of-stock lists say so", async t => {
+  const { env, ctx } = setup(t);
+  const replies = [];
+  let searches = 0;
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) { searches++; return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.37827", LONGITUDE: "103.88749" }] }); }
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  await worker.fetch(webhook(90, "/masks 530572"), env, ctx);
+  assert.equal(replies[0].text, "Couldn’t load the free N95 mask list right now. Find collection points on HazeMaskGoWhere: https://www.gowhere.gov.sg/hazemask");
+  assert.deepEqual(replies[0].reply_markup.inline_keyboard, [[{ text: "Open HazeMaskGoWhere ↗", url: "https://www.gowhere.gov.sg/hazemask" }]]);
+  assert.equal(searches, 0, "no list, no OneMap lookup");
+  await seedMasks(env, { fetchedAt: Date.now() - 45 * 60_000 });
+  await worker.fetch(webhook(91, "/masks 530572"), env, ctx);
+  assert.match(replies[1].text, /\n⚠️ Stock may be out of date: Hazey last checked at .+\.\nStock from HazeMaskGoWhere/);
+  await seedMasks(env, { edit: sites => sites.map(site => ({ ...site, stock: "out" })) });
+  await worker.fetch(webhook(92, "/masks 530572"), env, ctx);
+  assert.match(replies[2].text, /^None of the listed free N95 mask points has stock right now\.\n\nStock from HazeMaskGoWhere/);
+  assert.equal(replies[2].reply_markup.inline_keyboard[0][0].url, "https://www.gowhere.gov.sg/hazemask");
+  await seedMasks(env, { edit: () => [] });
+  await worker.fetch(webhook(93, "/masks 530572"), env, ctx);
+  assert.equal(replies[3].text, "No free N95 mask collection points are listed right now. Check HazeMaskGoWhere for updates: https://www.gowhere.gov.sg/hazemask");
+});
+
+test("scheduled runs prune expired /masks location requests", async t => {
+  const { db, env } = setup(t);
+  delete env.TELEGRAM_BOT_TOKEN;
+  t.mock.method(globalThis, "fetch", async url => url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url));
+  db.prepare("INSERT INTO bot_location_requests VALUES (1, 'masks', ?), (2, 'masks', ?)").run(Date.now() - 1, Date.now() + 60_000);
+  const pending = [];
+  await worker.scheduled({ scheduledTime: Date.now() }, env, { waitUntil(promise) { pending.push(promise); } });
+  await Promise.all(pending);
+  assert.deepEqual(db.prepare("SELECT chat_id FROM bot_location_requests").all().map(row => row.chat_id), [2]);
 });
