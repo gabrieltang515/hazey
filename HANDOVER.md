@@ -1,6 +1,42 @@
 # Hazey handover
 
-Updated: 15 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** on the dashboard. Since 21:00 SGT (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`), the bot has `/shelter`, channel alerts point to shelters above PSI 200, and the bot menu updates itself; **`/shelter` still needs a real Telegram reply confirmed by the owner** (see Remaining steps).
+Updated: 17 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** on the dashboard. Since 15 October 21:00 SGT (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`), the bot has `/shelter`, channel alerts point to shelters above PSI 200, and the bot menu updates itself; **`/shelter` still needs a real Telegram reply confirmed by the owner** (see Remaining steps). A **free N95 mask finder** (dashboard, `/masks`, channel block) is built and verified locally on branch `mask-finder`; it is **not deployed** yet and needs migration `0005` applied to production first.
+
+## Free N95 mask finder — built 17 October 2026, not yet deployed
+
+Asked for: "link the mask distribution sites". The owner chose a live finder on the dashboard, a bot command, channel posts and a hero link. Spec: `docs/superpowers/specs/2026-10-17-mask-finder-design.md`; plan: `docs/superpowers/plans/2026-10-17-mask-finder.md`. Built on branch `mask-finder` (from `main` at `642db7d`).
+
+- **Source: HazeMaskGoWhere** (`https://www.gowhere.gov.sg/hazemask`, short link `go.gov.sg/hazemask`), which NEA's 14 October 2026 haze update names for collection points and live vending-machine stock.
+  - **Files:** Hazey reads the two JSON files the official page loads: `data/data.csv.json` (113 CC counters) and `data/data.webhook.json` (37 vending machines, live stock). It never uses the 2025 fallback `data.json`.
+  - **Caveats:** these are not a published open dataset, so the format can change without notice. They send no CORS headers, so the Worker relays them.
+  - **User-Agent:** the CDN returns **403 without a User-Agent**, and Workers send none, so `src/mask-data.js` sends `Hazey/1.0 (+https://hazey.gabrieltang515.workers.dev)`.
+  - **Terms of use:** GoWhere's terms render only in a browser and **have not been reviewed; the owner should check them**. Hazey credits and links the source wherever the data appears.
+- **Data path** (`src/mask-data.js`, migration `0005_mask_sites.sql`):
+  - **Refresh:** the five-minute cron fetches both files independently of PSI and of each other. Each one is validated, normalized (contact numbers are dropped, text is capped at 200 characters) and saved as a row in `mask_sources`.
+  - **Older copies:** a copy with an older `Last-Modified` never replaces newer saved points, but any successful fetch counts as checked.
+  - **Failures keep the saved copy:** a failed fetch, a non-JSON page, or a file where *every* entry fails validation leaves the saved row in place. An empty `data: []` is treated as "nothing listed", the likely end of distribution.
+  - **`GET /api/masks`:** returns `{ sites, sources: { cc, vending }, inStock, active }`.
+  - **Stale:** a source is stale more than 30 minutes after its last successful fetch.
+  - **Active:** `active` is true when a fresh source has a point with stock, and it drives the hero link and the channel block.
+- **Dashboard** (`#masks`):
+  - **Finder:** the five nearest points that aren't out of stock or out of service, each with a stock badge, type, address, spot, hours, distance and Directions.
+  - **One search for both lists:** a single location or postal search fills both the shelter list and the mask list. The shared finder classes were renamed `shelter-*` → `place-*`; the IDs are unchanged.
+  - **Context:** NEA's eligibility summary with a link to the official FAQ, a "Find free N95 masks near you" hero link while `active`, and a footer credit.
+  - **Staleness:** worked out in the browser as well. Masks reload when the tab becomes visible and every 5 minutes, and the status re-renders when data passes 30 minutes old without rebuilding the lists.
+- **Bot:** `/masks` and the unlisted `/mask` alias.
+  - **Input:** a postal code works anywhere. Plain `/masks` in a private chat offers the location button and records the chat in `bot_location_requests` for 10 minutes (chat ID only, never the location), so the next shared location gets mask points instead of shelters.
+  - **Clearing the request:** the row is deleted after a successful reply. Plain `/shelter`, or a `/shelter` reply that offers the location button, also clears it. The cron prunes expired rows.
+  - **Shared code:** `/shelter`'s input handling moved to `src/nearby.js`, with its wording unchanged.
+  - **Menu:** `masks` is in `BOT_COMMANDS` and reaches the menu at the next minute-10 sync.
+- **Channel:** while `active`, posts at any PSI level add a "Free N95 masks:" block (counts of CC counters and machines with stock, the finder link, `/masks`, the official link) and a "Find free N95 masks" button.
+- **Verification (local, 17 October):**
+  - **Tests:** 66/66 Node tests (21 new or changed).
+  - **Dry run:** the Wrangler bundle is 95 KiB, 25 KiB gzipped.
+  - **Real fetch:** `wrangler dev` fetched both live files through workerd after the User-Agent fix: 150 points, both sources fresh, `active: true`.
+  - **Browser check:** passed at 1440px and 390px, including the mask list from both search boxes, stock badges, eligibility, the hero link and no overflow. Light, dark and phone screenshots were inspected.
+  - **Copy:** sample `/masks` and channel texts were printed from live data and reviewed.
+  - **Reviews:** a task review after each task and a final whole-branch review. Its findings were fixed: the saved copy is kept when every entry is invalid, browser-side staleness, empty-list copy, a pending-request edge case and the text cap.
+- **Known limits:** after the files are removed for good, the last list stays on the page with a dated stale warning (and an error is logged every 5 minutes) until the code is changed. Stock lags HazeMaskGoWhere by a few minutes because of its CDN cache.
 
 ## Bot shelters, channel shelter pointers and copy fixes — deployed 15 October 2026, 21:00 SGT
 
@@ -79,13 +115,23 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-1. **Confirm `/shelter` and the menu in Telegram (owner).** From the owner's Telegram account:
+1. **Deploy the mask finder (needs the owner's go-ahead).** From `mask-finder`:
+   - Run `npx wrangler d1 migrations apply PSI_DB --remote` **before** deploying, and confirm it with `npx wrangler d1 migrations list PSI_DB --remote`. Without `0005`, location replies and `/shelter` stop working, not just masks.
+   - Then run `npx wrangler deploy`.
+   - After the next cron:
+     - `/api/masks` shows both sources fresh.
+     - `wrangler tail hazey` shows no `Mask site refresh failed` lines. A `(403)` there would mean the CDN is now filtering Cloudflare traffic.
+     - The browser check passes against production.
+   - Fast-forward `main` and push.
+2. **Confirm `/masks` in Telegram (owner).** Send `/masks 530572` (expect Ci Yuan CC first, about 600 m). Then send plain `/masks`, tap "📍 Share my location", and check that mask points (not shelters) come back. Check that the menu lists `/masks` after the next minute-10 sync.
+3. **Check HazeMaskGoWhere's terms of use (owner).** They render only in a browser at gowhere.gov.sg.
+4. **Confirm `/shelter` and the menu in Telegram (owner).** From the owner's Telegram account:
    - Send `/shelter 530572` to `@hazey_sg_bot`. Expect Ang Mo Kio-Hougang Pinetree RN first, under 100 m.
    - Send plain `/shelter`, tap "📍 Share my location", and check the three shelters are nearby.
    - Check the command menu shows `/psi`, `/pm25`, `/shelter`, `/help` and `/start`. Telegram clients can cache the menu, so reopen the chat if needed.
 
    Watch `npx wrangler tail hazey` while testing. Until this is done, don't describe `/shelter` as verified live.
-2. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
+5. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
 
 Optional:
 
@@ -117,7 +163,7 @@ The public account/database IDs in source are resource identifiers, not credenti
 
 ## Architecture and important behavior
 
-- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), `/api/postal?code=` (OneMap postal code to `{ postal, lat, lng }` for the shelter finder, via `src/postal.js`), `/api/history` (`{ psi: [...], pm25: [...] }`, each item `{ at, north, south, east, west, central }`, ascending, last 25 hours), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
+- `src/worker.js` serves the same-origin `/api/psi` (PSI plus a nested `pm25` object or `null`), `/api/postal?code=` (OneMap postal code to `{ postal, lat, lng }` for the shelter finder, via `src/postal.js`), `/api/history` (`{ psi: [...], pm25: [...] }`, each item `{ at, north, south, east, west, central }`, ascending, last 25 hours), `/api/masks` (saved HazeMaskGoWhere mask points; see the mask finder section, branch `mask-finder` until deployed), the authenticated `POST /telegram/webhook`, static assets, and the scheduled refresh.
 - `src/psi.js` validates and normalizes both NEA responses. PSI requires valid 24-hour PSI values for all five regions and tolerates missing optional 24-hour pollutant fields. PM2.5 requires a non-negative `pm25_one_hourly` concentration for all five regions. Both choose the most recent observation.
 - `public/psi.js` shares PSI category boundaries, NEA 1-hour PM2.5 bands (I Normal 0–55, II Elevated 56–150, III High 151–250, IV Very high ≥251), and SGT formatting between the browser and bot.
 - `public/index.html`, `public/styles.css`, and `public/app.js` implement the buildless dashboard (no framework; shadcn-style design language by hand):
@@ -134,7 +180,7 @@ The public account/database IDs in source are resource identifiers, not credenti
 - One refresh fetches PSI and PM2.5 in parallel. Each saves independently: a PM2.5 failure is logged and never blocks or discards a PSI update, and saved PM2.5 survives later PM2.5 failures. The overdue-cache check uses the PSI snapshot age.
 - Snapshot refreshes run every five minutes, including while the page is closed. Browser checks run every minute. Requests also refresh an overdue cache; browser requests return saved data while refreshing, while bot commands can await the refresh.
 - Data is marked stale when the saved fetch is more than 15 minutes old or the observation is more than two hours old. Those are application freshness thresholds, not promises about NEA publication frequency.
-- Telegram commands are `/start`, `/help`, `/psi` and `/psi <region>` (24-hour PSI only), `/pm25` and `/pm25 <region>` (1-hour PM2.5 only), and `/shelter` (location in private chats, or `/shelter <postal code>`); the menu is resent hourly from `BOT_COMMANDS`. The owner asked that `/psi` not include PM2.5, and that `/help` list the region form of `/pm25` on its own line. Supported regions are north, south, east, west, central. Command names may contain digits. Mentions addressed to another configured bot are ignored.
+- Telegram commands are `/start`, `/help`, `/psi` and `/psi <region>` (24-hour PSI only), `/pm25` and `/pm25 <region>` (1-hour PM2.5 only), `/shelter` (location in private chats, or `/shelter <postal code>`), and, once the mask finder is deployed, `/masks` (alias `/mask`; same inputs, with a 10-minute pending request after plain `/masks`); the menu is resent hourly from `BOT_COMMANDS`. The owner asked that `/psi` not include PM2.5, and that `/help` list the region form of `/pm25` on its own line. Supported regions are north, south, east, west, central. Command names may contain digits. Mentions addressed to another configured bot are ignored.
 - The webhook requires `X-Telegram-Bot-Api-Secret-Token`. Successful duplicate updates are ignored; processing updates are retried; failed sends release the record for retry. Deduplication records are pruned after seven days.
 - Telegram `sendMessage` has no idempotency key: an ambiguous network failure after Telegram accepts a message can still produce a duplicate on retry. This limit is documented rather than claiming guaranteed exactly-once delivery.
 
