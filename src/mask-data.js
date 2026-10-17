@@ -7,6 +7,8 @@ export const MASK_SOURCES = {
   cc: "https://www.gowhere.gov.sg/hazemask/data/data.csv.json",
   vending: "https://www.gowhere.gov.sg/hazemask/data/data.webhook.json"
 };
+// HazeMaskGoWhere's CDN refuses requests without a User-Agent (HTTP 403), and Workers send none by default.
+const USER_AGENT = "Hazey/1.0 (+https://hazey.gabrieltang515.workers.dev)";
 
 const text = value => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
 // The option names flagged true in one of an entry's filter categories.
@@ -53,7 +55,7 @@ export function saveMaskSource(env, source, sites, fetchedAt, modifiedAt) {
 }
 
 async function refreshMaskSource(env, source, now) {
-  const response = await fetch(MASK_SOURCES[source], { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8_000) });
+  const response = await fetch(MASK_SOURCES[source], { headers: { Accept: "application/json", "User-Agent": USER_AGENT }, signal: AbortSignal.timeout(8_000) });
   if (!response.ok) throw new Error(`HazeMaskGoWhere request failed (${response.status})`);
   const { sites, dropped } = normalizeMaskSites(await response.json(), source);
   if (dropped) console.error(`Mask site refresh (${source}): ${sites.length} valid of ${sites.length + dropped}`);

@@ -618,7 +618,8 @@ test("mask refreshes save each HazeMaskGoWhere file on its own and never replace
   const { db, env } = setup(t);
   const now = Date.parse("2026-10-16T15:00:00Z");
   let ccResponse = () => maskFile(ccFile(), now - 60 * 60_000), vendingDown = false;
-  t.mock.method(globalThis, "fetch", async url => {
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(init?.headers?.["User-Agent"], "Hazey/1.0 (+https://hazey.gabrieltang515.workers.dev)", "HazeMaskGoWhere refuses requests without a User-Agent");
     if (url === MASK_SOURCES.cc) return ccResponse();
     if (url === MASK_SOURCES.vending) return vendingDown ? new Response("busy", { status: 503 }) : maskFile(vendingFile(), now - 5 * 60_000);
     assert.fail(`Unexpected fetch: ${url}`);
