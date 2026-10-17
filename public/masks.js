@@ -22,3 +22,10 @@ export function maskPlaces(counts) {
     .map(([count, noun]) => `${count} ${noun}${count === 1 ? "" : "s"}`)
     .join(" and ");
 }
+
+// { cc, vending } counts of a list of sites.
+export function maskCounts(sites) {
+  const counts = { cc: 0, vending: 0 };
+  for (const site of sites) counts[site.kind]++;
+  return counts;
+}

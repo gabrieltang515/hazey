@@ -4,8 +4,7 @@ import { BOT_COMMANDS, telegramApi } from "./telegram.js";
 import { broadcastChannel } from "./broadcast.js";
 import { lookupPostal, validPostalCode } from "./postal.js";
 import { shelterCommand } from "./shelters.js";
-import { masksCommand } from "./masks.js";
-import { loadMasks, refreshMasks } from "./mask-data.js";
+import { maskDistribution, masksCommand } from "./masks.js";
 
 const HELP = "Welcome to Hazey ☁️\n\nGet the latest NEA air quality readings for Singapore, and find the nearest haze shelters and free N95 mask points.\n\n/psi — 24-hour PSI, all regions\n/psi north — PSI for one region\n/pm25 — 1-hour PM2.5, all regions\n/pm25 north — PM2.5 for one region\n/shelter — nearest haze shelters to your location\n/shelter 530572 — haze shelters near a postal code\n/masks — free N95 mask points near your location\n/masks 530572 — mask points near a postal code\n\nRegions: north, south, east, west, central.\n/help — these commands\n\nReadings refresh every 5 minutes; NEA publishes the underlying readings on its own schedule.";
 
@@ -220,9 +219,7 @@ async function handleTelegram(request, env, ctx) {
       const snapshot = await storedSnapshot(env).catch(() => null);
       reply = await shelterCommand({ location, argument, isPrivate, regions: snapshot && !isStale(snapshot) ? snapshot.regions : null, appUrl });
     } else if (command === "masks") {
-      // The saved HazeMaskGoWhere list; replies never wait for a refresh.
-      const masks = await loadMasks(env).catch(() => null);
-      reply = await masksCommand({ location, argument, isPrivate, masks, appUrl });
+      reply = await masksCommand({ location, argument, isPrivate, active: maskDistribution(env), appUrl });
     }
     if (!reply.reply_markup && appUrl) reply.reply_markup = { inline_keyboard: [[{ text: "Open Hazey dashboard ↗", url: appUrl }]] };
     await telegramApi(env, "sendMessage", { chat_id: message.chat.id, link_preview_options: { is_disabled: true }, ...reply });
@@ -250,7 +247,7 @@ export default {
           const botUsername = (env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
           const botReady = env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_WEBHOOK_SECRET && /^[a-z0-9_]{5,32}$/i.test(botUsername);
           const pm25 = snapshot.pm25 && { ...snapshot.pm25, stale: isStale(snapshot.pm25) };
-          return json({ ...snapshot, stale: isStale(snapshot), pm25, botUsername: botReady ? botUsername : null });
+          return json({ ...snapshot, stale: isStale(snapshot), pm25, botUsername: botReady ? botUsername : null, masksActive: maskDistribution(env) });
         } catch {
           return json({ error: "PSI readings are temporarily unavailable. Please try again shortly." }, 503, { "Retry-After": "30" });
         }
@@ -258,10 +255,6 @@ export default {
       if (path === "/api/history") {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
         return json(await history(env));
-      }
-      if (path === "/api/masks") {
-        if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
-        return json(await loadMasks(env));
       }
       if (path === "/api/postal") {
         if (request.method !== "GET") return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
@@ -294,8 +287,6 @@ export default {
     ]).catch(error => console.error("Scheduled refresh failed:", error.message))
       .then(() => maintainHistory(env, controller.scheduledTime))
       .catch(error => console.error("History maintenance failed:", error.message)));
-    // Mask points refresh on their own: neither a mask nor a PSI outage blocks the other.
-    ctx.waitUntil(refreshMasks(env).catch(error => console.error("Mask site refresh failed:", error.message)));
     // Keep the bot's command menu current without rerunning the setup helper (which rotates the webhook secret).
     if (env.TELEGRAM_BOT_TOKEN && new Date(controller.scheduledTime).getUTCMinutes() === 10) {
       ctx.waitUntil(telegramApi(env, "setMyCommands", { commands: BOT_COMMANDS })

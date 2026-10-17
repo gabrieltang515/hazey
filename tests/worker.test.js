@@ -6,8 +6,9 @@ import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 import { broadcastChannel } from "../src/broadcast.js";
 import { ONEMAP_SEARCH_URL } from "../src/postal.js";
-import { MASK_SOURCES, loadMasks, normalizeMaskSites, refreshMasks, saveMaskSource } from "../src/mask-data.js";
-import { ccFile, vendingFile } from "./mask-fixtures.js";
+import { MASK_SITES } from "../public/mask-sites.js";
+import { maskCounts, maskPlaces } from "../public/masks.js";
+import { formatDistance, nearest } from "../public/geo.js";
 
 function fixture(timestamp = new Date().toISOString()) {
   return { code: 0, data: { items: [{ timestamp, updatedTimestamp: timestamp,
@@ -21,11 +22,7 @@ function pm25Fixture(timestamp = new Date().toISOString()) {
   }] } };
 }
 
-// Scheduled runs also fetch HazeMaskGoWhere; by default it lists nothing.
-const EMPTY_MASKS = { lastUpdated: "16 Oct 2026", data: [] };
-const maskSource = url => Object.keys(MASK_SOURCES).find(source => MASK_SOURCES[source] === url);
-const maskFile = (body, modified) => Response.json(body, modified ? { headers: { "Last-Modified": new Date(modified).toUTCString() } } : {});
-const nea = url => maskSource(url) ? Response.json(EMPTY_MASKS) : Response.json(url === PM25_API_URL ? pm25Fixture() : fixture());
+const nea = url => Response.json(url === PM25_API_URL ? pm25Fixture() : fixture());
 
 function setup(t) {
   const db = new DatabaseSync(":memory:");
@@ -291,10 +288,6 @@ function channelHarness(t) {
     if (url.startsWith(PM25_API_URL)) {
       if (options.pm25Down) return new Response("unavailable", { status: 503 });
       return Response.json(pm25Fixture(options.pm25At ?? new Date(now).toISOString()));
-    }
-    if (maskSource(url)) {
-      if (options.masksDown) return new Response("unavailable", { status: 503 });
-      return Response.json(options.masks?.[maskSource(url)] ?? EMPTY_MASKS);
     }
     if (url.endsWith("/setMyCommands")) return Response.json({ ok: true, result: true });
     assert.ok(url.endsWith("/sendMessage"));
@@ -614,127 +607,6 @@ test("scheduled runs refresh the bot command menu at minute 10 of each hour, onl
   assert.equal(calls.length, 2, "no token, no call");
 });
 
-test("mask refreshes save each HazeMaskGoWhere file on its own and never replace a newer saved copy", async t => {
-  const { db, env } = setup(t);
-  const now = Date.parse("2026-10-16T15:00:00Z");
-  let ccResponse = () => maskFile(ccFile(), now - 60 * 60_000), vendingDown = false;
-  t.mock.method(globalThis, "fetch", async (url, init) => {
-    assert.equal(init?.headers?.["User-Agent"], "Hazey/1.0 (+https://hazey.gabrieltang515.workers.dev)", "HazeMaskGoWhere refuses requests without a User-Agent");
-    if (url === MASK_SOURCES.cc) return ccResponse();
-    if (url === MASK_SOURCES.vending) return vendingDown ? new Response("busy", { status: 503 }) : maskFile(vendingFile(), now - 5 * 60_000);
-    assert.fail(`Unexpected fetch: ${url}`);
-  });
-  const errors = t.mock.method(console, "error", () => {});
-  const rows = () => Object.fromEntries(db.prepare("SELECT * FROM mask_sources").all().map(row => [row.source, row]));
-  await refreshMasks(env, now);
-  assert.equal(JSON.parse(rows().cc.payload).length, 5);
-  assert.equal(JSON.parse(rows().vending.payload).length, 2);
-  assert.equal(rows().vending.source_modified_at, now - 5 * 60_000, "stock time is the file's Last-Modified");
-  assert.deepEqual(errors.mock.calls.map(call => call.arguments.join(" ")), ["Mask site refresh (cc): 5 valid of 7"]);
-
-  const ccPayload = rows().cc.payload;
-  vendingDown = true;
-  ccResponse = () => maskFile(ccFile(), now - 2 * 60 * 60_000);
-  await refreshMasks(env, now + 5 * 60_000);
-  assert.equal(rows().vending.fetched_at, now, "a failed fetch keeps the saved copy");
-  assert.equal(rows().cc.source_modified_at, now - 60 * 60_000, "an older file never replaces a newer saved one");
-  assert.equal(rows().cc.payload, ccPayload);
-  assert.equal(rows().cc.fetched_at, now + 5 * 60_000, "but any successful fetch counts as checked");
-  assert.ok(errors.mock.calls.some(call => call.arguments.join(" ") === "Mask site refresh failed (vending): HazeMaskGoWhere request failed (503)"));
-
-  ccResponse = () => new Response("<!doctype html><title>GoWhere</title>", { headers: { "Content-Type": "text/html" } });
-  await refreshMasks(env, now + 10 * 60_000);
-  assert.equal(rows().cc.fetched_at, now + 5 * 60_000, "a page instead of JSON is a failed fetch");
-  ccResponse = () => maskFile(ccFile());
-  await refreshMasks(env, now + 15 * 60_000);
-  assert.equal(rows().cc.source_modified_at, now + 15 * 60_000, "no Last-Modified: the fetch time stands in");
-});
-
-test("/api/masks serves the saved points, marks a source stale after 30 minutes and says when distribution is running", async t => {
-  const { env, ctx } = setup(t);
-  const masks = async () => (await worker.fetch(new Request("https://hazey.example/api/masks"), env, ctx)).json();
-  assert.deepEqual(await masks(), { sites: [], sources: { cc: null, vending: null }, inStock: { cc: 0, vending: 0 }, active: false });
-  const now = Date.now();
-  await saveMaskSource(env, "cc", normalizeMaskSites(ccFile(), "cc").sites, now - 31 * 60_000, now - 60 * 60_000);
-  await saveMaskSource(env, "vending", normalizeMaskSites(vendingFile(), "vending").sites, now - 60_000, now - 2 * 60_000);
-  const body = await masks();
-  assert.equal(body.sites.length, 7);
-  assert.deepEqual([body.sources.cc.stale, body.sources.vending.stale], [true, false]);
-  assert.equal(body.sources.vending.updatedAt, new Date(now - 2 * 60_000).toISOString());
-  assert.equal(body.sources.cc.fetchedAt, new Date(now - 31 * 60_000).toISOString());
-  assert.deepEqual(body.inStock, { cc: 0, vending: 1 }, "stale sources don't count");
-  assert.equal(body.active, true);
-  assert.equal((await worker.fetch(new Request("https://hazey.example/api/masks", { method: "POST" }), env, ctx)).status, 405);
-
-  const later = now + 60 * 60_000;
-  await saveMaskSource(env, "vending", normalizeMaskSites(vendingFile(), "vending").sites, later - 30 * 60_000, later);
-  assert.equal((await loadMasks(env, later)).sources.vending.stale, false, "exactly 30 minutes is still fresh");
-  assert.equal((await loadMasks(env, later + 1)).active, false, "nothing fresh has stock");
-});
-
-test("scheduled runs refresh mask points alongside PSI, and neither outage blocks the other", async t => {
-  const { db, env } = setup(t);
-  delete env.TELEGRAM_BOT_TOKEN;
-  let masksDown = false, psiDown = false;
-  t.mock.method(globalThis, "fetch", async url => {
-    if (maskSource(url)) {
-      if (masksDown) throw new TypeError("fetch failed");
-      return maskFile(url === MASK_SOURCES.cc ? ccFile() : vendingFile());
-    }
-    if (psiDown) return new Response("unavailable", { status: 503 });
-    return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url);
-  });
-  const errors = t.mock.method(console, "error", () => {});
-  const count = table => db.prepare(`SELECT count(*) AS n FROM ${table}`).get().n;
-  const run = async () => {
-    const pending = [];
-    await worker.scheduled({ scheduledTime: Date.now() }, env, { waitUntil(promise) { pending.push(promise); } });
-    await Promise.all(pending);
-  };
-  await run();
-  assert.deepEqual([count("mask_sources"), count("psi_snapshot")], [2, 1]);
-  masksDown = true;
-  db.prepare("DELETE FROM psi_snapshot").run();
-  await run();
-  assert.deepEqual([count("mask_sources"), count("psi_snapshot")], [2, 1], "PSI saves during a mask outage, and saved points survive");
-  assert.ok(errors.mock.calls.some(call => call.arguments.join(" ") === "Mask site refresh failed (cc): fetch failed"));
-  masksDown = false; psiDown = true;
-  db.prepare("DELETE FROM mask_sources").run();
-  await run();
-  assert.equal(count("mask_sources"), 2, "masks save during a PSI outage");
-});
-
-// Saves the fixture files as if fetched at `fetchedAt`; `edit` changes the normalized sites first.
-async function seedMasks(env, { fetchedAt = Date.now(), edit = sites => sites } = {}) {
-  await saveMaskSource(env, "cc", edit(normalizeMaskSites(ccFile(), "cc").sites), fetchedAt, fetchedAt - 60 * 60_000);
-  await saveMaskSource(env, "vending", edit(normalizeMaskSites(vendingFile(), "vending").sites), fetchedAt, fetchedAt - 5 * 60_000);
-}
-
-test("/masks with a postal code replies with the three nearest mask points with stock, eligibility and the stock time", async t => {
-  const { env, ctx } = setup(t);
-  env.PUBLIC_APP_URL = "https://hazey.example";
-  const replies = [];
-  t.mock.method(globalThis, "fetch", async (url, init) => {
-    if (url.startsWith(ONEMAP_SEARCH_URL)) return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.378270724882904", LONGITUDE: "103.8874850986399" }] });
-    replies.push(JSON.parse(init.body));
-    return Response.json({ ok: true, result: {} });
-  });
-  await seedMasks(env);
-  assert.equal((await worker.fetch(webhook(70, "/masks 530572"), env, ctx)).status, 200);
-  const [reply] = replies;
-  assert.match(reply.text, /^Nearest free N95 mask points to postal code 530572\n\n1\. Ci Yuan CC — 600 m\nCC counter • In stock\n51 Hougang Ave 9 #01-01, Singapore 538776\nMonday to Sunday, 10am to 6pm\n\n2\. Buangkok CC — 780 m\n/);
-  assert.match(reply.text, /\n3\. Hougang Bus Interchange — 1\.0 km\nVending machine • Limited stock\n840 Hougang Central, Singapore 538757\nNear Boarding Berth 1\nDaily, 24 hours\n/);
-  assert.doesNotMatch(reply.text, /Punggol CC|Hougang Social Service Office/, "out of stock and out of service are left out");
-  assert.match(reply.text, /Pregnant women, children aged 7 to 16/);
-  assert.match(reply.text, /\nStock from HazeMaskGoWhere, updated .+\. Live stock: go\.gov\.sg\/hazemask$/);
-  const rows = reply.reply_markup.inline_keyboard;
-  assert.equal(rows.length, 4);
-  assert.equal(rows[0][0].text, "Directions: Ci Yuan CC");
-  assert.equal(rows[3][0].url, "https://hazey.example/#masks");
-  await worker.fetch(webhook(71, "/mask 530572"), env, ctx);
-  assert.equal(replies[1].text, reply.text, "/mask is an alias");
-});
-
 test("plain /masks offers the location button and the next shared location finds mask points; otherwise locations find shelters", async t => {
   const { db, env, ctx } = setup(t);
   const replies = [];
@@ -745,7 +617,7 @@ test("plain /masks offers the location button and the next shared location finds
     return Response.json({ ok: true, result: {} });
   });
   const errors = t.mock.method(console, "error", () => {});
-  await seedMasks(env);
+  env.MASK_DISTRIBUTION = "on";
   const here = { latitude: 1.37827, longitude: 103.88749 };
   const pendingRows = () => db.prepare("SELECT count(*) AS n FROM bot_location_requests").get().n;
   await worker.fetch(webhook(80, "/masks"), env, ctx);
@@ -757,7 +629,7 @@ test("plain /masks offers the location button and the next shared location finds
   assert.equal(pendingRows(), 1, "a failed reply keeps the request for Telegram's retry");
   telegramDown = false;
   await worker.fetch(telegramMessage(81, { location: here }), env, ctx);
-  assert.match(replies[1].text, /^Nearest free N95 mask points to your location\n\n1\. Ci Yuan CC — 600 m\n/);
+  assert.ok(replies[1].text.startsWith(`Nearest free N95 mask points to your location\n\n1. ${nearest({ lat: 1.37827, lng: 103.88749 }, MASK_SITES, 1)[0].name} — `));
   assert.equal(pendingRows(), 0, "used once");
   await worker.fetch(telegramMessage(82, { location: here }), env, ctx);
   assert.match(replies[2].text, /^Nearest haze shelters to your location/);
@@ -789,7 +661,7 @@ test("a failed /shelter postal lookup that offers the location button cancels a 
   });
   t.mock.method(console, "error", () => {});
   const pendingRows = () => db.prepare("SELECT count(*) AS n FROM bot_location_requests").get().n;
-  await seedMasks(env);
+  env.MASK_DISTRIBUTION = "on";
   await worker.fetch(webhook(90, "/masks"), env, ctx);
   assert.equal(pendingRows(), 1);
   await worker.fetch(webhook(91, "/shelter 530572"), env, ctx);
@@ -799,35 +671,13 @@ test("a failed /shelter postal lookup that offers the location button cancels a 
   assert.match(replies[2].text, /^Nearest haze shelters/);
 });
 
-test("/masks without saved data links HazeMaskGoWhere; stale stock is flagged; empty and out-of-stock lists say so", async t => {
-  const { env, ctx } = setup(t);
-  const replies = [];
-  let searches = 0;
-  t.mock.method(globalThis, "fetch", async (url, init) => {
-    if (url.startsWith(ONEMAP_SEARCH_URL)) { searches++; return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.37827", LONGITUDE: "103.88749" }] }); }
-    replies.push(JSON.parse(init.body));
-    return Response.json({ ok: true, result: {} });
-  });
-  await worker.fetch(webhook(90, "/masks 530572"), env, ctx);
-  assert.equal(replies[0].text, "Couldn’t load the free N95 mask list right now. Find collection points on HazeMaskGoWhere: https://www.gowhere.gov.sg/hazemask");
-  assert.deepEqual(replies[0].reply_markup.inline_keyboard, [[{ text: "Open HazeMaskGoWhere ↗", url: "https://www.gowhere.gov.sg/hazemask" }]]);
-  assert.equal(searches, 0, "no list, no OneMap lookup");
-  await seedMasks(env, { fetchedAt: Date.now() - 45 * 60_000 });
-  await worker.fetch(webhook(91, "/masks 530572"), env, ctx);
-  assert.match(replies[1].text, /\n⚠️ Stock may be out of date: Hazey last checked at .+\.\nStock from HazeMaskGoWhere/);
-  await seedMasks(env, { edit: sites => sites.map(site => ({ ...site, stock: "out" })) });
-  await worker.fetch(webhook(92, "/masks 530572"), env, ctx);
-  assert.match(replies[2].text, /^None of the listed free N95 mask points has stock right now\.\n\nStock from HazeMaskGoWhere/);
-  assert.equal(replies[2].reply_markup.inline_keyboard[0][0].url, "https://www.gowhere.gov.sg/hazemask");
-  await seedMasks(env, { edit: () => [] });
-  await worker.fetch(webhook(93, "/masks 530572"), env, ctx);
-  assert.equal(replies[3].text, "No free N95 mask collection points are listed right now. Check HazeMaskGoWhere for updates: https://www.gowhere.gov.sg/hazemask");
-});
-
 test("scheduled runs prune expired /masks location requests", async t => {
   const { db, env } = setup(t);
   delete env.TELEGRAM_BOT_TOKEN;
-  t.mock.method(globalThis, "fetch", async url => url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url));
+  t.mock.method(globalThis, "fetch", async url => {
+    assert.ok(!url.includes("gowhere.gov.sg"), "the Worker never fetches HazeMaskGoWhere");
+    return url.includes("?date=") ? Response.json({ code: 0, data: { items: [] } }) : nea(url);
+  });
   db.prepare("INSERT INTO bot_location_requests VALUES (1, 'masks', ?), (2, 'masks', ?)").run(Date.now() - 1, Date.now() + 60_000);
   const pending = [];
   await worker.scheduled({ scheduledTime: Date.now() }, env, { waitUntil(promise) { pending.push(promise); } });
@@ -835,19 +685,71 @@ test("scheduled runs prune expired /masks location requests", async t => {
   assert.deepEqual(db.prepare("SELECT chat_id FROM bot_location_requests").all().map(row => row.chat_id), [2]);
 });
 
-test("channel posts point to free N95 masks while distribution is running, at any PSI level, and stop when the list goes stale", async t => {
-  const { tick, messages } = channelHarness(t);
-  t.mock.method(console, "error", () => {});
-  const masks = { cc: ccFile(), vending: vendingFile() };
-  await tick("2026-10-14T05:55:00+08:00", 150, { masks }); // saves the list; nothing is due
-  await tick("2026-10-14T06:00:00+08:00", 150, { masks });
+test("/masks with a postal code replies with the three nearest saved mask points, eligibility and where the list comes from", async t => {
+  const { env, ctx } = setup(t);
+  env.PUBLIC_APP_URL = "https://hazey.example";
+  env.MASK_DISTRIBUTION = "on";
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) return Response.json({ results: [{ POSTAL: "530572", LATITUDE: "1.378270724882904", LONGITUDE: "103.8874850986399" }] });
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  const expected = nearest({ lat: 1.378270724882904, lng: 103.8874850986399 }, MASK_SITES, 3);
+  assert.equal((await worker.fetch(webhook(70, "/masks 530572"), env, ctx)).status, 200);
+  const [reply] = replies;
+  const [first] = expected;
+  assert.ok(reply.text.startsWith(`Nearest free N95 mask points to postal code 530572\n\n1. ${first.name} — ${formatDistance(first.km)}\n${first.kind === "cc" ? "CC counter" : "Vending machine"}\n`));
+  assert.deepEqual(reply.text.match(/^\d\. .+(?= — )/gm), expected.map((site, i) => `${i + 1}. ${site.name}`));
+  assert.doesNotMatch(reply.text, /In stock|Limited stock|Out of stock/, "no stock is claimed");
+  assert.match(reply.text, /Pregnant women, children aged 7 to 16/);
+  assert.match(reply.text, /\nLocations from HazeMaskGoWhere as at .+ SGT\. Stock changes through the day; check live stock before you go: go\.gov\.sg\/hazemask$/);
+  const rows = reply.reply_markup.inline_keyboard;
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0][0].text, `Directions: ${first.name}`);
+  assert.equal(rows[3][0].url, "https://hazey.example/#masks");
+  await worker.fetch(webhook(71, "/mask 530572"), env, ctx);
+  assert.equal(replies[1].text, reply.text, "/mask is an alias");
+});
+
+test("with mask distribution off, /masks says so, links HazeMaskGoWhere and offers no location button", async t => {
+  const { db, env, ctx } = setup(t);
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.ok(!url.startsWith(ONEMAP_SEARCH_URL), "no postal lookup while off");
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  await worker.fetch(webhook(95, "/masks 530572"), env, ctx);
+  assert.equal(replies[0].text, "Free N95 mask distribution isn’t running right now. HazeMaskGoWhere has the latest: https://www.gowhere.gov.sg/hazemask");
+  assert.deepEqual(replies[0].reply_markup.inline_keyboard, [[{ text: "Open HazeMaskGoWhere ↗", url: "https://www.gowhere.gov.sg/hazemask" }]]);
+  await worker.fetch(webhook(96, "/masks"), env, ctx);
+  assert.equal(replies[1].reply_markup.keyboard, undefined);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM bot_location_requests").get().n, 0);
+});
+
+test("/api/psi tells the dashboard whether free mask distribution is on, and the live mask API is gone", async t => {
+  const { env, ctx } = setup(t);
+  t.mock.method(globalThis, "fetch", async url => nea(url));
+  const psi = async () => (await worker.fetch(new Request("https://hazey.example/api/psi"), env, ctx)).json();
+  assert.equal((await psi()).masksActive, false);
+  env.MASK_DISTRIBUTION = "on";
+  assert.equal((await psi()).masksActive, true);
+  assert.equal((await worker.fetch(new Request("https://hazey.example/api/masks"), env, ctx)).status, 404);
+});
+
+test("channel posts point to free N95 masks while distribution is on, at any PSI level, and not when it is off", async t => {
+  const { tick, env, messages } = channelHarness(t);
+  env.MASK_DISTRIBUTION = "on";
+  await tick("2026-10-14T06:00:00+08:00", 150);
   assert.equal(messages.length, 1);
-  assert.match(messages[0].text, /\n\nFree N95 masks:\nEligible groups can collect free N95 masks at 4 CC counters and 1 vending machine with stock now\.\nFind one: https:\/\/hazey\.example\/#masks or send \/masks to @hazey_psi_bot\nOfficial list: go\.gov\.sg\/hazemask\n\nMOH guidance/);
+  assert.ok(messages[0].text.includes(`\n\nFree N95 masks:\nEligible groups can collect free N95 masks at ${maskPlaces(maskCounts(MASK_SITES))}.\nFind one: https://hazey.example/#masks or send /masks to @hazey_psi_bot\nLive stock: go.gov.sg/hazemask\n\nMOH guidance`));
   assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#masks"]);
-  await tick("2026-10-14T06:20:00+08:00", 220, { masks });
+  await tick("2026-10-14T06:20:00+08:00", 220);
   assert.match(messages[1].text, /Haze shelters:[\s\S]*Free N95 masks:/);
   assert.deepEqual(messages[1].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#shelters", "https://hazey.example/#masks"]);
-  await tick("2026-10-14T07:00:00+08:00", 220, { masksDown: true }); // last saved at 06:20, 40 minutes ago
+  delete env.MASK_DISTRIBUTION;
+  await tick("2026-10-14T07:00:00+08:00", 220);
   assert.equal(messages.length, 3);
   assert.doesNotMatch(messages[2].text, /Free N95 masks/);
   assert.equal(messages[2].reply_markup.inline_keyboard.length, 2);
