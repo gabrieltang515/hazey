@@ -632,16 +632,19 @@ test("mask refreshes save each HazeMaskGoWhere file on its own and never replace
   assert.equal(rows().vending.source_modified_at, now - 5 * 60_000, "stock time is the file's Last-Modified");
   assert.deepEqual(errors.mock.calls.map(call => call.arguments.join(" ")), ["Mask site refresh (cc): 5 valid of 7"]);
 
+  const ccPayload = rows().cc.payload;
   vendingDown = true;
   ccResponse = () => maskFile(ccFile(), now - 2 * 60 * 60_000);
   await refreshMasks(env, now + 5 * 60_000);
   assert.equal(rows().vending.fetched_at, now, "a failed fetch keeps the saved copy");
-  assert.equal(rows().cc.fetched_at, now, "an older file never replaces a newer saved one");
+  assert.equal(rows().cc.source_modified_at, now - 60 * 60_000, "an older file never replaces a newer saved one");
+  assert.equal(rows().cc.payload, ccPayload);
+  assert.equal(rows().cc.fetched_at, now + 5 * 60_000, "but any successful fetch counts as checked");
   assert.ok(errors.mock.calls.some(call => call.arguments.join(" ") === "Mask site refresh failed (vending): HazeMaskGoWhere request failed (503)"));
 
   ccResponse = () => new Response("<!doctype html><title>GoWhere</title>", { headers: { "Content-Type": "text/html" } });
   await refreshMasks(env, now + 10 * 60_000);
-  assert.equal(rows().cc.fetched_at, now, "a page instead of JSON is a failed fetch");
+  assert.equal(rows().cc.fetched_at, now + 5 * 60_000, "a page instead of JSON is a failed fetch");
   ccResponse = () => maskFile(ccFile());
   await refreshMasks(env, now + 15 * 60_000);
   assert.equal(rows().cc.source_modified_at, now + 15 * 60_000, "no Last-Modified: the fetch time stands in");
@@ -774,6 +777,26 @@ test("plain /masks offers the location button and the next shared location finds
   assert.equal(replies[8].text, "Send /masks with a postal code, e.g. /masks 530572. To use your location, message me privately.");
   assert.equal(db.prepare("SELECT count(*) AS n FROM bot_location_requests WHERE chat_id = -100").get().n, 0);
   assert.ok(errors.mock.calls.every(call => !/1\.37827|103\.88749/.test(call.arguments.join(" "))), "locations never reach the logs");
+});
+
+test("a failed /shelter postal lookup that offers the location button cancels a pending /masks request", async t => {
+  const { db, env, ctx } = setup(t);
+  const replies = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    if (url.startsWith(ONEMAP_SEARCH_URL)) return new Response("busy", { status: 429 });
+    replies.push(JSON.parse(init.body));
+    return Response.json({ ok: true, result: {} });
+  });
+  t.mock.method(console, "error", () => {});
+  const pendingRows = () => db.prepare("SELECT count(*) AS n FROM bot_location_requests").get().n;
+  await seedMasks(env);
+  await worker.fetch(webhook(90, "/masks"), env, ctx);
+  assert.equal(pendingRows(), 1);
+  await worker.fetch(webhook(91, "/shelter 530572"), env, ctx);
+  assert.ok(replies[1].reply_markup.keyboard, "the failed lookup offers the location button");
+  assert.equal(pendingRows(), 0);
+  await worker.fetch(telegramMessage(92, { location: { latitude: 1.37827, longitude: 103.88749 } }), env, ctx);
+  assert.match(replies[2].text, /^Nearest haze shelters/);
 });
 
 test("/masks without saved data links HazeMaskGoWhere; stale stock is flagged; empty and out-of-stock lists say so", async t => {

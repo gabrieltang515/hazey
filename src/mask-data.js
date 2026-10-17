@@ -2,6 +2,7 @@
 // files the official page loads, not a published open dataset, so every failure falls back to linking that site.
 // They send no CORS headers, so the Worker relays them.
 import { inSingapore } from "./postal.js";
+import { MASK_STALE_AFTER } from "../public/masks.js";
 
 export const MASK_SOURCES = {
   cc: "https://www.gowhere.gov.sg/hazemask/data/data.csv.json",
@@ -10,7 +11,8 @@ export const MASK_SOURCES = {
 // HazeMaskGoWhere's CDN refuses requests without a User-Agent (HTTP 403), and Workers send none by default.
 const USER_AGENT = "Hazey/1.0 (+https://hazey.gabrieltang515.workers.dev)";
 
-const text = value => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+// Capped so a runaway upstream string can't push a Telegram reply past its 4096-character limit.
+const text = value => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, 200) : "";
 // The option names flagged true in one of an entry's filter categories.
 function flagged(entry, category) {
   const filter = Array.isArray(entry.filters) ? entry.filters.find(item => item?.category === category) : null;
@@ -40,17 +42,17 @@ function maskSite(entry, source) {
 export function normalizeMaskSites(body, source) {
   if (!Array.isArray(body?.data)) throw new Error("Unexpected HazeMaskGoWhere format");
   const sites = body.data.map(entry => maskSite(entry, source)).filter(Boolean);
+  if (body.data.length > 0 && sites.length === 0) throw new Error(`No valid HazeMaskGoWhere entries (0 of ${body.data.length})`);
   return { sites, dropped: body.data.length - sites.length };
 }
 
-export const MASK_STALE_AFTER = 30 * 60_000;
-
-// An older copy of a file (by Last-Modified) never replaces a newer saved one.
+// An older copy of a file (by Last-Modified) never replaces newer saved points, but any successful fetch counts as checked.
 export function saveMaskSource(env, source, sites, fetchedAt, modifiedAt) {
   return env.PSI_DB.prepare(
     "INSERT INTO mask_sources (source, payload, fetched_at, source_modified_at) VALUES (?, ?, ?, ?) " +
-    "ON CONFLICT(source) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at, source_modified_at = excluded.source_modified_at " +
-    "WHERE excluded.source_modified_at >= mask_sources.source_modified_at"
+    "ON CONFLICT(source) DO UPDATE SET fetched_at = excluded.fetched_at, " +
+    "payload = CASE WHEN excluded.source_modified_at >= mask_sources.source_modified_at THEN excluded.payload ELSE mask_sources.payload END, " +
+    "source_modified_at = MAX(mask_sources.source_modified_at, excluded.source_modified_at)"
   ).bind(source, JSON.stringify(sites), fetchedAt, modifiedAt).run();
 }
 

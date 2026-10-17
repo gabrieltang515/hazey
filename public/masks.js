@@ -3,6 +3,9 @@
 export const MASK_FINDER_URL = "https://www.gowhere.gov.sg/hazemask";
 export const MASK_SHORT_URL = "go.gov.sg/hazemask";
 
+// A source not refreshed for this long is stale.
+export const MASK_STALE_AFTER = 30 * 60_000;
+
 export const MASK_KINDS = { cc: "CC counter", vending: "Vending machine" };
 export const MASK_STOCK = { in: "In stock", limited: "Limited stock", out: "Out of stock", offline: "Out of service", unknown: "Stock unknown" };
 

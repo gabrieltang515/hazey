@@ -19,6 +19,7 @@ test("HazeMaskGoWhere entries normalize to sites with kind, stock, hours and spo
     ["vending", "limited", "Near Boarding Berth 1", "Daily, 24 hours"]
   ]);
   assert.equal("contactNumber" in vending.sites[0], false, "contact numbers are not kept");
+  assert.equal(normalizeMaskSites({ data: [maskEntry({ name: "x".repeat(500), lat: 1.3, lng: 103.8 })] }, "cc").sites[0].name.length, 200, "long upstream text is capped");
 });
 
 test("out of service beats stock flags, the most cautious stock flag wins, and the file decides an unflagged kind", () => {
@@ -38,7 +39,7 @@ test("a file without a data array is a failed fetch; an empty list is valid", ()
   assert.throws(() => normalizeMaskSites({ code: 0, data: { items: [] } }, "cc"), /Unexpected HazeMaskGoWhere format/);
   assert.throws(() => normalizeMaskSites(null, "cc"), /Unexpected HazeMaskGoWhere format/);
   assert.deepEqual(normalizeMaskSites({ lastUpdated: "16 Oct 2026", data: [] }, "cc"), { sites: [], dropped: 0 });
-  assert.deepEqual(normalizeMaskSites({ data: [null, "x", { name: "No coordinates", address: "1 Road" }] }, "cc"), { sites: [], dropped: 3 });
+  assert.throws(() => normalizeMaskSites({ data: [null, "x", { name: "No coordinates", address: "1 Road" }] }, "cc"), /No valid HazeMaskGoWhere entries \(0 of 3\)/);
 });
 
 test("shared mask helpers: collectable points, stock time and place counts", () => {

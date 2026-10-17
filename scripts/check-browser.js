@@ -145,7 +145,7 @@ async function main() {
       const withStock = maskData.sites.filter(site => site.stock !== "out" && site.stock !== "offline").length;
       assert.equal(masks.eligibility, 7, `${viewport.name}: eligibility lists seven groups`);
       assert.ok(masks.official, `${viewport.name}: HazeMaskGoWhere is linked`);
-      assert.equal(masks.jump, maskData.active, `${viewport.name}: hero mask link follows distribution`);
+      assert.equal(masks.jump, maskData.active && !Object.values(maskData.sources).some(source => source?.stale), `${viewport.name}: hero mask link follows distribution`);
       if (withStock) {
         assert.equal(masks.names.length, Math.min(5, withStock), `${viewport.name}: nearest mask points with stock`);
         assert.ok(masks.badges.every(text => ["In stock", "Limited stock", "Stock unknown"].includes(text)), `${viewport.name}: stock badges`);

@@ -165,7 +165,8 @@ function locationRequest(env, chatId, command, argument, reply) {
       "ON CONFLICT(chat_id) DO UPDATE SET kind = excluded.kind, expires_at = excluded.expires_at"
     ).bind(chatId, Date.now() + LOCATION_REQUEST_TTL)];
   }
-  if ((command === "masks" || command === "shelter") && !argument) {
+  // Plain /masks or /shelter cancels a pending request, and so does a /shelter postal lookup that offers the button instead.
+  if ((command === "masks" || command === "shelter") && (!argument || reply.reply_markup?.keyboard)) {
     return [env.PSI_DB.prepare("DELETE FROM bot_location_requests WHERE chat_id = ?").bind(chatId)];
   }
   return [];
