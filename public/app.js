@@ -2,6 +2,7 @@ import { REGIONS, PSI_BANDS, PM25_BANDS, category, pm25Band, regionList, regionN
 import { MAP_VIEWBOX, LAND_PATH, REGION_SHAPES, REGION_LABELS } from "./map-data.js";
 import { SHELTERS, SHELTERS_AS_AT } from "./shelters.js";
 import { SHELTER_KINDS, directionsUrl, nearest, formatDistance } from "./geo.js";
+import { MASK_KINDS, MASK_STOCK, collectable, maskPlaces, stockUpdatedAt } from "./masks.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const HOUR = 60 * 60_000;
@@ -27,7 +28,9 @@ const METRICS = {
 
 const state = {
   data: null, history: null, historyKey: "", loading: false, mapReady: false,
-  metric: storage.get("hazey-metric") === "pm25" ? "pm25" : "psi", newUntil: 0
+  metric: storage.get("hazey-metric") === "pm25" ? "pm25" : "psi", newUntil: 0,
+  // `masks` is undefined until /api/masks first answers, then null if it never could. `nearby` is the latest search.
+  masks: undefined, nearby: null
 };
 
 function svg(tag, attributes = {}, parent) {
@@ -528,7 +531,8 @@ heat.addEventListener("keydown", event => {
   if (reading) announce(`${regionName(reading.key)}, ${singaporeClock(reading.t)}: ${Number.isFinite(reading.value) ? `${formatValue("pm25", reading.value)}, ${pm25Band(reading.value).label}` : "no reading"}`);
 });
 
-/* ---------- Haze shelters ---------- */
+/* ---------- Nearby: haze shelters and free N95 mask points ---------- */
+// One search, by device location or postal code, fills both lists. Locations never leave the browser.
 
 byId("shelters-meta").textContent = `Air-conditioned rooms at ${SHELTERS.length} community clubs and residents’ centres, from the People’s Association list as at ${SHELTERS_AS_AT}`;
 
@@ -543,89 +547,160 @@ function renderShelterStatus() {
   byId("shelter-jump").hidden = highest <= 200;
 }
 
-function setShelterMessage(text, results = []) {
-  byId("shelter-message").textContent = text;
-  byId("shelter-list").replaceChildren(...results);
-  byId("shelter-results").classList.toggle("is-empty", !results.length);
+// `prefix` is "shelter" or "mask", naming the section's message, list and results elements.
+function setResults(prefix, text, items = []) {
+  byId(`${prefix}-message`).textContent = text;
+  byId(`${prefix}-list`).replaceChildren(...items);
+  byId(`${prefix}-results`).classList.toggle("is-empty", !items.length);
 }
 
-function shelterItem(shelter) {
-  const item = Object.assign(document.createElement("li"), { className: "shelter" });
-  const body = Object.assign(document.createElement("div"), { className: "shelter-body" });
-  body.append(
-    Object.assign(document.createElement("h3"), { className: "shelter-name", textContent: shelter.name }),
-    Object.assign(document.createElement("p"), { className: "shelter-address", textContent: `${shelter.address}, Singapore ${shelter.postal}` }),
-    Object.assign(document.createElement("p"), { className: "shelter-kind", textContent: SHELTER_KINDS[shelter.kind] })
-  );
-  const side = Object.assign(document.createElement("div"), { className: "shelter-side" });
+// A result with its distance and directions. `meta` is an optional line under the name; `details` follow the address.
+function placeItem(place, details, meta = null) {
+  const item = Object.assign(document.createElement("li"), { className: "place" });
+  const body = Object.assign(document.createElement("div"), { className: "place-body" });
+  body.append(Object.assign(document.createElement("h3"), { className: "place-name", textContent: place.name }));
+  if (meta) body.append(meta);
+  body.append(Object.assign(document.createElement("p"), { className: "place-address", textContent: place.postal ? `${place.address}, Singapore ${place.postal}` : place.address }));
+  for (const text of details) body.append(Object.assign(document.createElement("p"), { className: "place-kind", textContent: text }));
+  const side = Object.assign(document.createElement("div"), { className: "place-side" });
   const link = Object.assign(document.createElement("a"), {
-    className: "shelter-link", textContent: "Directions", target: "_blank", rel: "noopener noreferrer",
-    href: directionsUrl(shelter)
+    className: "place-link", textContent: "Directions", target: "_blank", rel: "noopener noreferrer",
+    href: directionsUrl(place)
   });
-  link.append(Object.assign(document.createElement("span"), { className: "sr-only", textContent: ` to ${shelter.name} in Google Maps` }));
-  side.append(Object.assign(document.createElement("p"), { className: "shelter-distance", textContent: formatDistance(shelter.km) }), link);
+  link.append(Object.assign(document.createElement("span"), { className: "sr-only", textContent: ` to ${place.name} in Google Maps` }));
+  side.append(Object.assign(document.createElement("p"), { className: "place-distance", textContent: formatDistance(place.km) }), link);
   item.append(body, side);
   return item;
 }
 
 function showShelters(origin, label) {
   const closest = nearest(origin, SHELTERS, 5);
-  setShelterMessage(closest[0].km > 30
+  setResults("shelter", closest[0].km > 30
     ? `The nearest shelter is ${formatDistance(closest[0].km)} from ${label}. These shelters are in Singapore only.`
-    : `Nearest to ${label}`, closest.map(shelterItem));
+    : `Nearest to ${label}`, closest.map(shelter => placeItem(shelter, [SHELTER_KINDS[shelter.kind]])));
 }
+
+const STOCK_TONES = { in: "good", limited: "moderate", unknown: "unknown" };
+
+function maskItem(site) {
+  const meta = Object.assign(document.createElement("p"), { className: "place-meta" });
+  const badge = Object.assign(document.createElement("span"), { className: "badge", textContent: MASK_STOCK[site.stock] });
+  badge.dataset.band = STOCK_TONES[site.stock] ?? "unknown";
+  meta.append(badge, MASK_KINDS[site.kind]);
+  return placeItem(site, [site.spot, site.hours].filter(Boolean), meta);
+}
+
+const masksListed = masks => Boolean(masks && (masks.sources.cc || masks.sources.vending));
+
+function renderMasks() {
+  const masks = state.masks;
+  const status = byId("mask-status");
+  byId("mask-jump").hidden = !masks?.active;
+  status.dataset.band = masks?.active ? "good" : "unknown";
+  if (!masksListed(masks)) {
+    status.textContent = "Couldn’t load the mask list right now. HazeMaskGoWhere has the official list of collection points.";
+  } else {
+    const counts = { cc: 0, vending: 0 };
+    for (const site of masks.sites) counts[site.kind]++;
+    if (masks.sites.length) byId("masks-meta").textContent = `${maskPlaces(counts)}, from HazeMaskGoWhere`;
+    const stale = Object.values(masks.sources).filter(source => source?.stale);
+    const updated = singaporeClock(stockUpdatedAt(masks.sources));
+    const open = masks.inStock.cc + masks.inStock.vending;
+    status.textContent = stale.length
+      ? `Stock may be out of date: Hazey last checked at ${singaporeClock(Math.min(...stale.map(source => Date.parse(source.fetchedAt))))}. Check live stock on HazeMaskGoWhere before you go.`
+      : !masks.sites.length ? "No collection points are listed right now."
+      : open ? `Stock updated ${updated}: ${maskPlaces(masks.inStock)} ${open === 1 ? "has" : "have"} masks.`
+      : `Stock updated ${updated}: none of the listed points has masks right now.`;
+  }
+  renderMaskResults();
+}
+
+function renderMaskResults() {
+  const { masks, nearby } = state;
+  if (nearby?.message) return setResults("mask", nearby.message);
+  if (masks === undefined) return setResults("mask", "Loading mask collection points");
+  if (!masksListed(masks)) return setResults("mask", "Couldn’t load the mask list right now. Check HazeMaskGoWhere for collection points.");
+  if (!nearby) return setResults("mask", "Your five nearest mask points with stock will appear here.");
+  const closest = nearest(nearby.origin, masks.sites.filter(collectable), 5);
+  if (!closest.length) return setResults("mask", "None of the listed mask points has stock right now.");
+  setResults("mask", closest[0].km > 30
+    ? `The nearest mask point is ${formatDistance(closest[0].km)} from ${nearby.label}. These points are in Singapore only.`
+    : `Nearest with stock to ${nearby.label}`, closest.map(maskItem));
+}
+
+// `nearby` is { message } while a search is busy or after it fails, or { origin, label } once it succeeds.
+function setNearby(nearby) {
+  state.nearby = nearby;
+  if (nearby.origin) showShelters(nearby.origin, nearby.label);
+  else setResults("shelter", nearby.message);
+  renderMaskResults();
+}
+
+const finders = ["", "mask-"].map(prefix => ({
+  locate: byId(`${prefix}locate-button`), form: byId(`${prefix}postal-form`),
+  input: byId(`${prefix}postal-input`), submit: byId(`${prefix}postal-button`)
+}));
 
 function setFinderBusy(busy) {
-  for (const id of ["locate-button", "postal-button"]) byId(id).disabled = busy;
+  for (const finder of finders) finder.locate.disabled = finder.submit.disabled = busy;
 }
 
-byId("locate-button").addEventListener("click", () => {
+function locate() {
   if (!navigator.geolocation) {
-    setShelterMessage("This browser can’t share your location. Enter a postal code instead.");
+    setNearby({ message: "This browser can’t share your location. Enter a postal code instead." });
     return;
   }
   setFinderBusy(true);
-  setShelterMessage("Finding your location");
+  setNearby({ message: "Finding your location" });
   navigator.geolocation.getCurrentPosition(position => {
     setFinderBusy(false);
-    showShelters({ lat: position.coords.latitude, lng: position.coords.longitude }, "your location");
+    setNearby({ origin: { lat: position.coords.latitude, lng: position.coords.longitude }, label: "your location" });
   }, error => {
     setFinderBusy(false);
-    setShelterMessage(error.code === error.PERMISSION_DENIED
+    setNearby({ message: error.code === error.PERMISSION_DENIED
       ? "Location access is off for this site. Enter a postal code instead."
-      : "Couldn’t get your location. Try again, or enter a postal code.");
+      : "Couldn’t get your location. Try again, or enter a postal code." });
   }, { enableHighAccuracy: false, timeout: 15_000, maximumAge: 5 * 60_000 });
-});
+}
 
-byId("postal-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  const input = byId("postal-input");
-  const code = input.value.replace(/\s/g, "");
+async function searchPostal(finder) {
+  const value = finder.input.value;
+  const code = value.replace(/\s/g, "");
+  // Both boxes show the same search.
+  for (const other of finders) other.input.value = value;
   if (!/^\d{6}$/.test(code)) {
-    input.setAttribute("aria-invalid", "true");
-    setShelterMessage("Enter a six-digit postal code.");
-    input.focus();
+    for (const other of finders) other.input.setAttribute("aria-invalid", "true");
+    setNearby({ message: "Enter a six-digit postal code." });
+    finder.input.focus();
     return;
   }
-  input.removeAttribute("aria-invalid");
+  for (const other of finders) other.input.removeAttribute("aria-invalid");
   setFinderBusy(true);
-  setShelterMessage(`Looking up ${code}`);
+  setNearby({ message: `Looking up ${code}` });
   try {
     const response = await fetch(`/api/postal?code=${code}`, { signal: AbortSignal.timeout(12_000) });
     if (response.status === 404) {
-      setShelterMessage(`Couldn’t find postal code ${code}. Check the number and try again.`);
+      setNearby({ message: `Couldn’t find postal code ${code}. Check the number and try again.` });
       return;
     }
     if (!response.ok) throw new Error("Lookup unavailable");
     const place = await response.json();
     if (!Number.isFinite(place?.lat) || !Number.isFinite(place?.lng)) throw new Error("Invalid lookup");
-    showShelters(place, `postal code ${code}`);
+    setNearby({ origin: place, label: `postal code ${code}` });
   } catch {
-    setShelterMessage("Postal code lookup is unavailable right now. Use your location, or try again shortly.");
+    setNearby({ message: "Postal code lookup is unavailable right now. Use your location, or try again shortly." });
   } finally {
     setFinderBusy(false);
   }
-});
+}
+
+for (const finder of finders) {
+  finder.locate.addEventListener("click", locate);
+  finder.form.addEventListener("submit", event => {
+    event.preventDefault();
+    searchPostal(finder);
+  });
+}
 
 /* ---------- Loading ---------- */
 
@@ -633,6 +708,24 @@ function validSnapshot(data) {
   return Array.isArray(data?.regions) && data.regions.length === 5 &&
     REGIONS.every(key => data.regions.some(r => r.key === key && Number.isInteger(r.psi) && r.psi >= 0)) &&
     Number.isFinite(Date.parse(data.readingAt)) && Number.isFinite(Date.parse(data.sourceUpdatedAt)) && Number.isFinite(Date.parse(data.fetchedAt));
+}
+
+function validMasks(data) {
+  return Array.isArray(data?.sites) && typeof data.active === "boolean" && Boolean(data.sources) && Boolean(data.inStock);
+}
+
+// Mask points load on their own; a failure keeps the last loaded list and never affects the readings.
+async function loadMaskPoints() {
+  try {
+    const response = await fetch("/api/masks", { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+    if (!response.ok) throw new Error("Mask points unavailable");
+    const data = await response.json();
+    if (!validMasks(data)) throw new Error("Invalid mask points");
+    state.masks = data;
+  } catch {
+    state.masks ??= null;
+  }
+  renderMasks();
 }
 
 async function loadHistory(key) {
@@ -775,3 +868,5 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) load
 setInterval(() => { if (!document.hidden) load(); }, 60_000);
 setInterval(renderLive, 20_000);
 load();
+loadMaskPoints();
+setInterval(() => { if (!document.hidden) loadMaskPoints(); }, 5 * 60_000);

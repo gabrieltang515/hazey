@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f6f6ee">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="Live NEA 24-hour PSI and 1-hour PM2.5 for Singapore’s north, south, east, west, and central regions, with 24-hour trends and the nearest community haze shelters.">
+  <meta name="description" content="Live NEA 24-hour PSI and 1-hour PM2.5 for Singapore’s north, south, east, west, and central regions, with 24-hour trends, the nearest community haze shelters and free N95 mask collection points.">
   <title>Hazey · Singapore PSI and PM2.5</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/public-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -50,7 +50,8 @@
             <button type="button" role="radio" aria-checked="true" data-metric="psi">24-hour PSI</button>
             <button type="button" role="radio" aria-checked="false" data-metric="pm25" tabindex="-1">1-hour PM2.5</button>
           </div>
-          <p class="shelter-jump" id="shelter-jump" hidden><a href="#shelters">Find a haze shelter near you</a></p>
+          <p class="hero-jump" id="shelter-jump" hidden><a href="#shelters">Find a haze shelter near you</a></p>
+          <p class="hero-jump" id="mask-jump" hidden><a href="#masks">Find free N95 masks near you</a></p>
         </div>
         <figure class="map-figure">
           <svg class="map" id="map" role="group" aria-label="Map of Singapore’s five air quality regions"></svg>
@@ -113,10 +114,10 @@
             <p class="section-meta" id="shelters-meta">Air-conditioned rooms at community clubs and residents’ centres</p>
           </div>
         </div>
-        <div class="shelter-layout">
-          <div class="shelter-intro">
-            <p class="shelter-status" id="shelter-status" data-band="unknown">NEA opens haze shelters when the 24-hour PSI goes above 200.</p>
-            <div class="shelter-finder">
+        <div class="place-layout">
+          <div class="place-intro">
+            <p class="place-status" id="shelter-status" data-band="unknown">NEA opens haze shelters when the 24-hour PSI goes above 200.</p>
+            <div class="place-finder">
               <button class="primary-button" id="locate-button" type="button">Use my location</button>
               <form class="postal-form" id="postal-form" novalidate>
                 <label for="postal-input">Or enter a postal code</label>
@@ -126,14 +127,67 @@
                 </div>
               </form>
             </div>
-            <p class="shelter-privacy">Your location stays on this device. Postal codes are looked up with OneMap and aren’t stored.</p>
+            <p class="place-privacy">Your location stays on this device. Postal codes are looked up with OneMap and aren’t stored. One search fills both the shelter and mask lists.</p>
           </div>
-          <div class="shelter-results is-empty" id="shelter-results">
-            <p class="shelter-message" id="shelter-message" role="status">Your five nearest shelters will appear here.</p>
-            <ol class="shelter-list" id="shelter-list"></ol>
+          <div class="place-results is-empty" id="shelter-results">
+            <p class="place-message" id="shelter-message" role="status">Your five nearest shelters will appear here.</p>
+            <ol class="place-list" id="shelter-list"></ol>
           </div>
         </div>
-        <p class="shelter-note">Distances are in a straight line. Call the centre before you go to confirm the room and its opening hours.</p>
+        <p class="place-note">Distances are in a straight line. Call the centre before you go to confirm the room and its opening hours.</p>
+      </section>
+
+      <section class="masks" id="masks" aria-labelledby="masks-title">
+        <div class="section-head">
+          <div>
+            <h2 id="masks-title">Free N95 masks near you</h2>
+            <p class="section-meta" id="masks-meta">Collection points from HazeMaskGoWhere, the government’s mask locator</p>
+          </div>
+        </div>
+        <div class="place-layout">
+          <div class="place-intro">
+            <p class="place-status" id="mask-status" data-band="unknown">Loading mask collection points</p>
+            <div class="place-finder">
+              <button class="primary-button" id="mask-locate-button" type="button">Use my location</button>
+              <form class="postal-form" id="mask-postal-form" novalidate>
+                <label for="mask-postal-input">Or enter a postal code</label>
+                <div class="postal-row">
+                  <input id="mask-postal-input" name="postal" type="text" inputmode="numeric" autocomplete="postal-code" placeholder="6 digits" spellcheck="false" aria-describedby="mask-message">
+                  <button class="ghost-button" id="mask-postal-button" type="submit">Find</button>
+                </div>
+              </form>
+            </div>
+            <p class="place-privacy">Your location stays on this device. Postal codes are looked up with OneMap and aren’t stored. One search fills both the shelter and mask lists.</p>
+          </div>
+          <div class="place-results is-empty" id="mask-results">
+            <p class="place-message" id="mask-message" role="status">Loading mask collection points</p>
+            <ol class="place-list" id="mask-list"></ol>
+          </div>
+        </div>
+        <div class="eligibility" id="mask-eligibility">
+          <h3>Who can collect</h3>
+          <div class="eligibility-groups">
+            <div>
+              <p class="eligibility-where">At a CC counter or a vending machine</p>
+              <ul>
+                <li>Pioneer and Merdeka Generation</li>
+                <li>CHAS Blue and Orange cardholders</li>
+                <li>Medical Fee Exemption Card holders</li>
+                <li>ComCare recipients</li>
+              </ul>
+            </div>
+            <div>
+              <p class="eligibility-where">At CC counters only</p>
+              <ul>
+                <li>Pregnant women</li>
+                <li>Children aged 7 to 16</li>
+                <li>People with medical conditions such as asthma</li>
+              </ul>
+            </div>
+          </div>
+          <p class="eligibility-note">Bring the eligible person’s NRIC; someone else can collect on their behalf. Each pack has two masks. As announced by NEA on 14 October 2026; see the <a href="https://www.gowhere.gov.sg/hazemask/faq" target="_blank" rel="noopener noreferrer">official FAQ</a>.</p>
+        </div>
+        <p class="place-note">Out-of-stock points and vending machines that are out of service are left out. Distances are in a straight line. <a href="https://www.gowhere.gov.sg/hazemask" target="_blank" rel="noopener noreferrer">Check live stock on HazeMaskGoWhere ↗</a></p>
       </section>
 
       <section class="telegram" id="telegram-panel" aria-labelledby="telegram-title" hidden>
@@ -152,6 +206,7 @@
       <p>Readings from NEA via <a href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view" target="_blank" rel="noopener noreferrer">data.gov.sg</a>. Map regions are approximate, drawn around NEA’s regional reference points. <a href="https://www.nea.gov.sg/our-services/pollution-control/air-pollution/air-quality" target="_blank" rel="noopener noreferrer">NEA’s air quality guidance</a></p>
       <p class="footer-credit">Map contains information from <a href="https://data.gov.sg/datasets/d_bf4d24df9129d5a8ff8cf82e20959ee0/view" target="_blank" rel="noopener noreferrer">URA Master Plan 2019 Region Boundary (No Sea)</a>, accessed 14 October 2026 from data.gov.sg, under the <a href="https://data.gov.sg/open-data-licence" target="_blank" rel="noopener noreferrer">Singapore Open Data Licence v1.0</a>.</p>
       <p class="footer-credit">Haze shelters from the People’s Association’s <a href="https://isomer-user-content.by.gov.sg/101/18b0895f-7ef6-4210-949a-5521b7f31e74/Community%20Haze%20Shelters%20at%20CCs,%20ICHs,%20RCs,%20and%20RNs%202026.pdf" target="_blank" rel="noopener noreferrer">community haze shelter list</a> (as at September 2026). Shelter and postal code locations contain information from <a href="https://www.onemap.gov.sg" target="_blank" rel="noopener noreferrer">OneMap</a>, Singapore Land Authority, under the <a href="https://www.onemap.gov.sg/legal/opendatalicence.html" target="_blank" rel="noopener noreferrer">Singapore Open Data Licence v1.0</a>.</p>
+      <p class="footer-credit">Free N95 mask collection points and stock from <a href="https://www.gowhere.gov.sg/hazemask" target="_blank" rel="noopener noreferrer">HazeMaskGoWhere</a>, Government of Singapore.</p>
     </footer>
   </div>
   <noscript><p class="noscript">Turn on JavaScript to load live readings, or open the <a href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view">NEA dataset</a>.</p></noscript>
