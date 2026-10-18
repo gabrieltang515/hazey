@@ -81,7 +81,7 @@ The bot responds to commands when requested. People receive automated broadcasts
 
 ## Automated channel reports
 
-Create a public Telegram channel and add `@hazey_sg_bot` as an administrator with **Post Messages** enabled. This checkout targets `@hazey_sg`, configured with `TELEGRAM_CHANNEL_ID` in `wrangler.jsonc`; the bot uses the existing `TELEGRAM_BOT_TOKEN` Worker secret. Activation is pending the Cloudflare owner's migration and deployment; see the owner instructions in [HANDOVER.md](HANDOVER.md). Changing the channel requires the same administrator setup. Remove `TELEGRAM_CHANNEL_ID` and redeploy to disable broadcasts.
+Create a public Telegram channel and add `@hazey_sg_bot` as an administrator with **Post Messages** enabled. This checkout targets `@hazey_sg`, configured with `TELEGRAM_CHANNEL_ID` in `wrangler.jsonc`; the bot uses the existing `TELEGRAM_BOT_TOKEN` Worker secret. Broadcasts have been live since 15 October 2026; see [HANDOVER.md](HANDOVER.md) for the deployed state. Changing the channel requires the same administrator setup. Remove `TELEGRAM_CHANNEL_ID` and redeploy to disable broadcasts.
 
 - Regular reports use fixed Singapore-time slots: **02:00, 06:00, 10:00, 14:00, 18:00, 22:00**.
 - Overall Singapore 24-hour PSI is NEA's regional minimum–maximum range, computed from the five official regional readings supplied by the API. It is not an average or a separate invented national reading.

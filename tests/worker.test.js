@@ -496,8 +496,10 @@ test("normal channel advice includes the 100/101 and 300/301 boundaries", async 
   const values = maximum => ({ north: 50, south: 50, east: 50, west: maximum, central: 50 });
   await tick("2026-10-14T06:00:00+08:00", 100, { values: values(100) });
   assert.match(messages[0].text, /normal activities can continue for all groups/);
+  assert.doesNotMatch(messages[0].text, /If you feel unwell/);
   await tick("2026-10-14T10:00:00+08:00", 101, { values: values(101) });
   assert.match(messages[1].text, /Healthy.*reduce/i);
+  assert.match(messages[1].text, /\nIf you feel unwell, seek medical attention, especially if you are in a vulnerable group\.\n/);
   await tick("2026-10-14T10:20:00+08:00", 300, { values: values(300) });
   assert.match(messages[2].text, /Healthy.*avoid/i);
   await tick("2026-10-14T11:00:00+08:00", 301, { values: values(301) });

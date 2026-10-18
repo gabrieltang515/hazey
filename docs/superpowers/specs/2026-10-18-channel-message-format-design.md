@@ -8,7 +8,7 @@ Make `@hazey_sg` posts readable at a glance. The first line, which Telegram show
 
 ## Scope
 
-- **Changes:** `channelMessage` and the `sendMessage` payload in `src/broadcast.js`, plus the channel tests.
+- **Changes:** `channelMessage` (replaced by `channelPost`, which builds the whole `sendMessage` payload) in `src/broadcast.js`, plus the channel tests.
 - **Unchanged:** bot replies (`/psi`, `/pm25`, `/shelter`, `/masks`, `/help`), the dashboard, and the shared copy helpers (`shelterNotice` and the others in `public/psi.js`). Also unchanged are when posts are sent (breach, hourly and regular rules), the D1 lease and state, and notifications: every post still notifies as it does today, so there is no `disable_notification`.
 
 ## Formatting
@@ -70,7 +70,7 @@ Raw URLs are no longer written out for the dashboard, `#shelters`, `#masks` or t
 
 ## Trend arrows
 
-- **Source:** the saved PSI history row at exactly one hour before the current PSI reading: `SELECT readings FROM reading_history WHERE dataset = 'psi' AND reading_at = ?`, bound to `readingAt − 1 hour`. It is read in `broadcastChannel` after the snapshot is re-read under the lease, and passed to `channelMessage` as `previous` (a `{ north, … }` object, or `null`).
+- **Source:** the saved PSI history row at exactly one hour before the current PSI reading: `SELECT readings FROM reading_history WHERE dataset = 'psi' AND reading_at = ?`, bound to `readingAt − 1 hour`. It is read in `broadcastChannel` after the snapshot is re-read under the lease, and passed to `channelPost` as `previous` (a `{ north, … }` object, or `null`).
 - **Per region:** `↑{n}` when PSI rose, `↓{n}` when it fell, `±0` when unchanged. There is no arrow when the row is missing, unreadable, or the region's previous value isn't a non-negative integer.
 - **Applies to:** all three post types.
 - **PSI only:** there are no arrows on PM2.5, which is a 1-hour value and swings too much to be useful.

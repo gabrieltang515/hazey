@@ -150,3 +150,13 @@ test("inserted text is HTML-escaped so Telegram can always parse the post", () =
   assert.ok(post.text.includes('<a href="https://hazey.example/?a=&quot;1&quot;&amp;b=&lt;2&gt;">Hazey dashboard</a>'));
   assertTelegramHtml(post.text);
 });
+
+test("without an app URL or bot username the post has no buttons, no dashboard link and no bot pointers", () => {
+  const post = channelPost(snapshot([120, 130, 140, 250, 160]), "hourly", { masks: { cc: 1, vending: 0 } }, NOW);
+  assert.equal(post.reply_markup, undefined);
+  assert.doesNotMatch(post.text, /Hazey dashboard|Nearest:/);
+  assert.ok(post.text.includes("Call the centre before you go to confirm the room and its opening hours.\n"));
+  assert.ok(post.text.includes("\nEligible groups can collect them at 1 CC counter. Live stock: go.gov.sg/hazemask\n"));
+  assert.ok(post.text.endsWith('\n<a href="https://www.nea.gov.sg/our-services/pollution-control/air-pollution/managing-haze">MOH advice via NEA</a> · Data: <a href="https://data.gov.sg/datasets/d_fe37906a0182569d891506e815e819b7/view">NEA via data.gov.sg</a>'));
+  assertTelegramHtml(post.text);
+});
