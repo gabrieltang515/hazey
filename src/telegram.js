@@ -5,7 +5,8 @@ export async function telegramApi(env, method, body) {
     body: JSON.stringify(body), signal: AbortSignal.timeout(10_000)
   });
   const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error(`Telegram ${method} failed (${response.status})`);
+  // Telegram's own reason (e.g. "Bad Request: can't parse entities") never contains the token.
+  if (!response.ok || !result.ok) throw new Error(`Telegram ${method} failed (${response.status})${result.description ? `: ${String(result.description).slice(0, 200)}` : ""}`);
   return result.result;
 }
 

@@ -5,6 +5,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import worker, { backfillHistory, refreshPsi } from "../src/worker.js";
 import { API_URL, PM25_API_URL, normalizePsi } from "../src/psi.js";
 import { broadcastChannel } from "../src/broadcast.js";
+import { telegramApi } from "../src/telegram.js";
 import { ONEMAP_SEARCH_URL } from "../src/postal.js";
 import { MASK_SITES } from "../public/mask-sites.js";
 import { maskCounts, maskPlaces } from "../public/masks.js";
@@ -771,4 +772,17 @@ test("channel posts point to free N95 masks while distribution is on, at any PSI
   assert.equal(messages.length, 3);
   assert.doesNotMatch(messages[2].text, /Free N95 masks/);
   assert.equal(messages[2].reply_markup.inline_keyboard.length, 2);
+});
+
+test("Telegram errors carry Telegram's reason but never the token or request URL", async t => {
+  const env = { TELEGRAM_BOT_TOKEN: "123:SECRET_TOKEN" };
+  t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false, error_code: 400,
+    description: "Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 7" }, { status: 400 }));
+  await assert.rejects(telegramApi(env, "sendMessage", { chat_id: "@hazey_sg", text: "<x>" }), error => {
+    assert.equal(error.message, "Telegram sendMessage failed (400): Bad Request: can't parse entities: Unsupported start tag \"x\" at byte offset 7");
+    assert.doesNotMatch(error.message, /SECRET_TOKEN|api\.telegram\.org/);
+    return true;
+  });
+  t.mock.method(globalThis, "fetch", async () => Response.json({ ok: false }, { status: 429 }));
+  await assert.rejects(telegramApi(env, "sendMessage", {}), { message: "Telegram sendMessage failed (429)" });
 });
