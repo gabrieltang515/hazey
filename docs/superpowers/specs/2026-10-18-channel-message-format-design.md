@@ -37,6 +37,7 @@ Blank lines separate the blocks, in this order.
    - `breach`: `⚠️ <b>Haze alert: PSI {high} in {where}</b>`. `where` is `regionList` of the regions at the highest PSI, e.g. "the West region" or "the West and Central regions".
    - `hourly`: `{dot of high} <b>Hourly haze update: PSI {low}–{high}</b>`
    - `regular`: `{dot of high} <b>Air quality update: PSI {low}–{high}</b>`
+   - When every region has the same PSI, the range is a single value, e.g. `PSI 60`.
 2. **Bands and time:** `{dot} {band}` when every region is in the same band, otherwise `{dot of low} {low band} to {dot of high} {high band}`. This is followed by ` · {PSI reading time} SGT`.
 3. **Region rows**, in NEA order: `{dot} {Region} <b>{psi}</b>{trend} · PM2.5 {value}`.
    - The dot is the region's own PSI band.
