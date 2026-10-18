@@ -94,6 +94,19 @@ export function channelPost(snapshot, kind, { appUrl = null, botUsername = null,
   return post;
 }
 
+// The saved PSI an hour before this reading, for the trend arrows. The arrows are optional, so a failed lookup or an
+// unreadable row only leaves them out.
+async function previousHour(env, readingAt) {
+  try {
+    const row = await env.PSI_DB.prepare("SELECT readings FROM reading_history WHERE dataset = 'psi' AND reading_at = ?")
+      .bind(readingAt - HOUR).first();
+    return row ? JSON.parse(row.readings) : null;
+  } catch (error) {
+    console.error("Channel trend lookup failed:", error.message);
+    return null;
+  }
+}
+
 // The five-minute scheduled refresh is the only broadcaster. Commands never subscribe people.
 export async function broadcastChannel(env, snapshot, now = Date.now()) {
   const channel = env.TELEGRAM_CHANNEL_ID;
@@ -133,8 +146,9 @@ export async function broadcastChannel(env, snapshot, now = Date.now()) {
       const bot = (env.TELEGRAM_BOT_USERNAME ?? "").replace(/^@/, "");
       const botUsername = /^[a-z0-9_]{5,32}$/i.test(bot) ? bot : null;
       const masks = maskDistribution(env) ? maskCounts(MASK_SITES) : null;
+      const previous = await previousHour(env, readingAt);
       const kind = breach ? "breach" : active ? "hourly" : "regular";
-      await telegramApi(env, "sendMessage", { chat_id: channel, ...channelPost(snapshot, kind, { appUrl, botUsername, masks }, now) });
+      await telegramApi(env, "sendMessage", { chat_id: channel, ...channelPost(snapshot, kind, { appUrl, botUsername, masks, previous }, now) });
       // Only successful delivery consumes a slot or completes the pending first alert.
       await env.PSI_DB.prepare("UPDATE channel_broadcasts SET pending_breach = 0, last_slot = ? WHERE channel_id = ? AND owner = ?")
         .bind(slot, channel, owner).run();

@@ -352,6 +352,23 @@ test("hourly channel report waits for the current NEA observation and sends when
   assert.equal(messages.length, 2);
 });
 
+test("channel rows show the change since the saved reading an hour earlier, and leave out arrows it can't compare", async t => {
+  const { tick, db, messages } = channelHarness(t);
+  await tick("2026-10-14T15:00:00+08:00", 220);
+  assert.doesNotMatch(messages[0].text, /[↑↓±]/, "no saved reading for 2 pm");
+  await tick("2026-10-14T16:00:00+08:00", 225);
+  assert.equal(messages.length, 2);
+  assert.match(messages[1].text, /\n🟠 North <b>120<\/b> ±0 · PM2.5 55\n/);
+  assert.match(messages[1].text, /\n🔴 West <b>225<\/b> ↑5 · PM2.5 257\n/);
+  assert.match(messages[1].text, /\n<i>24-hour PSI \(↑↓ since 3:00 pm\) · 1-hour PM2.5 in µg\/m³<\/i>\n/);
+  db.prepare("UPDATE reading_history SET readings = 'not json' WHERE dataset = 'psi' AND reading_at = ?").run(Date.parse("2026-10-14T16:00:00+08:00"));
+  const errors = t.mock.method(console, "error", () => {});
+  await tick("2026-10-14T17:00:00+08:00", 210);
+  assert.equal(messages.length, 3, "an unreadable hour still posts");
+  assert.doesNotMatch(messages[2].text, /[↑↓±]/);
+  assert.equal(errors.mock.calls.filter(call => call.arguments[0] === "Channel trend lookup failed:").length, 1);
+});
+
 test("failed channel deliveries retry on the next check without losing the immediate breach or scheduled slot", async t => {
   const { tick, messages } = channelHarness(t);
   await tick("2026-10-14T15:20:00+08:00", 220, { telegramDown: true });
