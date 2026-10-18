@@ -311,11 +311,12 @@ test("channel regular reports follow 6am-anchored four-hour SGT slots, including
     "2026-10-14T18:00:00+08:00", "2026-10-14T22:00:00+08:00", "2026-10-15T00:00:00+08:00", "2026-10-15T02:00:00+08:00"]) await tick(time);
   assert.equal(messages.length, 6);
   assert.ok(messages.every(message => message.chat_id === "@hazey_sg"));
-  assert.match(messages[0].text, /Overall Singapore.*120–150/);
-  assert.match(messages[0].text, /North: PSI 120.*PM2.5 55/);
-  assert.match(messages[0].text, /Central: PSI 150.*PM2.5 151/);
-  assert.match(messages[0].text, /1-hour PM2.5.*µg\/m³/);
-  assert.match(messages[0].text, /https:\/\/hazey.example/);
+  assert.equal(messages[0].parse_mode, "HTML");
+  assert.match(messages[0].text, /^🟠 <b>Air quality update: PSI 120–150<\/b>\n/);
+  assert.match(messages[0].text, /\n🟠 North <b>120<\/b> · PM2.5 55\n/);
+  assert.match(messages[0].text, /\n🟠 Central <b>150<\/b> · PM2.5 151\n/);
+  assert.match(messages[0].text, /1-hour PM2.5 in µg\/m³/);
+  assert.match(messages[0].text, /<a href="https:\/\/hazey.example">Hazey dashboard<\/a>/);
 });
 
 test("breach alerts immediately, then hourly, holds at 200, clears silently and resumes the fixed schedule", async t => {
@@ -324,7 +325,7 @@ test("breach alerts immediately, then hourly, holds at 200, clears silently and 
   assert.equal(messages.length, 0, "200 alone does not enter alert mode");
   await tick("2026-10-14T15:20:00+08:00", 201);
   assert.equal(messages.length, 1);
-  assert.match(messages[0].text, /PSI alert/);
+  assert.match(messages[0].text, /^⚠️ <b>Haze alert: PSI 201 in the West region<\/b>\n/);
   await tick("2026-10-14T15:25:00+08:00", 205);
   assert.equal(messages.length, 1);
   await tick("2026-10-14T16:00:00+08:00", 205);
@@ -476,7 +477,7 @@ test("normal channel advice includes the 100/101 and 300/301 boundaries", async 
   const { tick, messages } = channelHarness(t);
   const values = maximum => ({ north: 50, south: 50, east: 50, west: maximum, central: 50 });
   await tick("2026-10-14T06:00:00+08:00", 100, { values: values(100) });
-  assert.match(messages[0].text, /Normal activities/);
+  assert.match(messages[0].text, /normal activities can continue for all groups/);
   await tick("2026-10-14T10:00:00+08:00", 101, { values: values(101) });
   assert.match(messages[1].text, /Healthy.*reduce/i);
   await tick("2026-10-14T10:20:00+08:00", 300, { values: values(300) });
@@ -564,10 +565,10 @@ test("postal lookup failures still reply, complete the update, and keep codes an
 test("channel posts above 200 point to haze shelters, add the 10 pm hours when Hazardous, and omit them at 200 or below", async t => {
   const { tick, messages } = channelHarness(t);
   await tick("2026-10-14T15:20:00+08:00", 206);
-  assert.match(messages[0].text, /Haze shelters:\nThe 24-hour PSI is 206 in the West region, above 200, the level at which NEA opens haze shelters\.\nFind the nearest: https:\/\/hazey\.example\/#shelters or send \/shelter to @hazey_psi_bot\nCall the centre before you go/);
-  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#shelters"]);
+  assert.ok(messages[0].text.includes("\n🏠 <b>Haze shelters</b>\nNEA opens haze shelters when the 24-hour PSI is above 200. Call the centre before you go to confirm the room and its opening hours. Nearest: send /shelter to @hazey_psi_bot\n"));
+  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row.map(button => button.url)), [["https://hazey.example"], ["https://hazey.example/#shelters"]]);
   await tick("2026-10-14T16:00:00+08:00", 305);
-  assert.match(messages[1].text, /The 24-hour PSI is 305 in the West region, in the Hazardous range\. NEA says haze shelters at community clubs stay open until 10 pm\./);
+  assert.match(messages[1].text, /The 24-hour PSI is Hazardous in the West region\. NEA says haze shelters at community clubs stay open until 10 pm\./);
   await tick("2026-10-14T17:00:00+08:00", 199);
   await tick("2026-10-14T18:00:00+08:00", 199);
   assert.equal(messages.length, 3);
@@ -743,11 +744,11 @@ test("channel posts point to free N95 masks while distribution is on, at any PSI
   env.MASK_DISTRIBUTION = "on";
   await tick("2026-10-14T06:00:00+08:00", 150);
   assert.equal(messages.length, 1);
-  assert.ok(messages[0].text.includes(`\n\nFree N95 masks:\nEligible groups can collect free N95 masks at ${maskPlaces(maskCounts(MASK_SITES))}.\nFind one: https://hazey.example/#masks or send /masks to @hazey_psi_bot\nLive stock: go.gov.sg/hazemask\n\nMOH guidance`));
-  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#masks"]);
+  assert.ok(messages[0].text.includes(`\n\n😷 <b>Free N95 masks</b>\nEligible groups can collect them at ${maskPlaces(maskCounts(MASK_SITES))}. Nearest: send /masks to @hazey_psi_bot · Live stock: go.gov.sg/hazemask\n\n<a href="https://hazey.example">Hazey dashboard</a>`));
+  assert.deepEqual(messages[0].reply_markup.inline_keyboard.map(row => row.map(button => button.url)), [["https://hazey.example"], ["https://hazey.example/#masks"]]);
   await tick("2026-10-14T06:20:00+08:00", 220);
-  assert.match(messages[1].text, /Haze shelters:[\s\S]*Free N95 masks:/);
-  assert.deepEqual(messages[1].reply_markup.inline_keyboard.map(row => row[0].url), ["https://hazey.example", "https://hazey.example/#shelters", "https://hazey.example/#masks"]);
+  assert.match(messages[1].text, /Haze shelters<\/b>[\s\S]*Free N95 masks<\/b>/);
+  assert.deepEqual(messages[1].reply_markup.inline_keyboard.map(row => row.map(button => button.url)), [["https://hazey.example"], ["https://hazey.example/#shelters", "https://hazey.example/#masks"]]);
   delete env.MASK_DISTRIBUTION;
   await tick("2026-10-14T07:00:00+08:00", 220);
   assert.equal(messages.length, 3);

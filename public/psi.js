@@ -63,6 +63,12 @@ export function singaporeTime(timestamp) {
   return fullFormat.format(new Date(timestamp));
 }
 
+// "18 Oct, 11:00 am": always dated, for channel posts that are read or forwarded later.
+export function singaporeDayTime(timestamp) {
+  const date = new Date(timestamp);
+  return `${dayFormat.format(date)}, ${clockFormat.format(date)}`;
+}
+
 // "6:00 pm" today, or "13 Oct, 11:00 pm" for another Singapore date.
 export function singaporeClock(timestamp, now = Date.now()) {
   const date = new Date(timestamp);
