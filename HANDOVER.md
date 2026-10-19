@@ -1,6 +1,33 @@
 # Hazey handover
 
-Updated: 17 October 2026, Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** on the dashboard. Since 15 October 21:00 SGT (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`), the bot has `/shelter`, channel alerts point to shelters above PSI 200, and the bot menu updates itself; **`/shelter` still needs a real Telegram reply confirmed by the owner** (see Remaining steps). A **free N95 mask finder** (dashboard, `/masks`, channel block) is **live** since 17 October 16:57 SGT (version `8d7d31d4-ee84-4a17-855f-906f4c09b036`), from a saved HazeMaskGoWhere list because HazeMaskGoWhere blocks Cloudflare; **`/masks` still needs a real Telegram reply confirmed by the owner**, and the owner should switch it off when distribution ends (see Remaining steps).
+Updated: 19 October 2026, 22:30 Singapore time. Telegram channel broadcasts are **live** in [@hazey_sg](https://t.me/hazey_sg), in a **new post format** since 19 October 21:35 SGT (version `dcf926d6-41f6-4a54-9d21-b69f7330e3ee`). The first new post, [t.me/hazey_sg/71](https://t.me/hazey_sg/71), was read back and rendered correctly; **the owner's check on a phone is still pending** (see Remaining steps). A PM2.5 24-hour overview and a nearest haze shelter finder are **live** on the dashboard. Since 15 October 21:00 SGT (version `6eaf95b2-9739-41ed-95c4-4ca54648786b`), the bot has `/shelter`, channel alerts point to shelters above PSI 200, and the bot menu updates itself; **`/shelter` still needs a real Telegram reply confirmed by the owner** (see Remaining steps). A **free N95 mask finder** (dashboard, `/masks`, channel block) is **live** since 17 October 16:57 SGT (version `8d7d31d4-ee84-4a17-855f-906f4c09b036`), from a saved HazeMaskGoWhere list because HazeMaskGoWhere blocks Cloudflare; **`/masks` still needs a real Telegram reply confirmed by the owner**, and the owner should switch it off when distribution ends (see Remaining steps).
+
+## Channel post format — deployed 19 October 2026, 21:35 SGT
+
+Asked for: a reformatted channel message. The owner vetted a proposal in chat, chose to keep notifications as they were, and asked for change-since-last-hour arrows. Spec: `docs/superpowers/specs/2026-10-18-channel-message-format-design.md`. Plan: `docs/superpowers/plans/2026-10-18-channel-message-format.md`. Built on branch `channel-format`, then fast-forwarded into `main`.
+
+- **What changed** (`channelPost` in `src/broadcast.js`, which replaced `channelMessage` and the inline button code):
+  - **HTML mode:** posts are sent with `parse_mode: "HTML"`, using only `<b>`, `<i>` and `<a href>`. Every inserted value is escaped.
+  - **Headline:** the first line, which shows in notifications, says how bad the air is: "⚠️ Haze alert: PSI 206 in the West region" for a breach, otherwise "{dot} Hourly haze update / Air quality update: PSI low–high".
+  - **Band line:** bands and the reading time, e.g. "🟡 Moderate to 🟠 Unhealthy · 19 Oct, 10:00 pm SGT".
+  - **Region rows:** "{dot} Region **PSI** ↑n/↓n/±0 · PM2.5 n". The dots match the dashboard colours (🟢 🟡 🟠 🔴 🟣).
+  - **Arrows:** read from the `reading_history` row exactly one hour before the reading (`previousHour`). No arrow when that row is missing or unreadable. A failed lookup logs `Channel trend lookup failed: …` and the post still goes out.
+  - **Key line:** italic; it gives the PM2.5 time only when it differs from the PSI time. A "PM2.5 is delayed" line is added when PM2.5 is stale.
+  - **Sections:** "🩺 Health advice · for PSI n" with bullets, "🏠 Haze shelters" above 200, "😷 Free N95 masks" while distribution is on.
+  - **Footer:** text links (Hazey dashboard · MOH advice via NEA · Data: NEA via data.gov.sg). Raw URLs are gone.
+  - **Buttons:** "📊 Hazey dashboard" on row 1. Row 2, when it has anything, holds "🏠 Nearest shelter" (above 200) and "😷 Free N95 masks".
+  - **Unchanged:** when posts are sent, the D1 lease and state, notifications, bot replies and the dashboard.
+- **Telegram errors** now include Telegram's own reason (`src/telegram.js`), e.g. `Telegram sendMessage failed (400): Bad Request: can't parse entities …`. That is the sign the HTML was rejected. The token and request URL are never included.
+- **Verification:**
+  - **Tests:** 75/75 Node tests (65 before), including exact-text posts, a Telegram-HTML validity check, escaping, arrows (including across midnight and with bad rows) and an end-to-end arrow test through D1.
+  - **Reviews:** a review after each task, then a final whole-branch review, with its fixes applied.
+  - **Before deploying:** Wrangler dry run (123 KiB / 32 KiB gzipped), and sample posts printed from the real code and read.
+  - **Production:**
+    - `/`, `/api/psi`, `/api/history` and `/app.js` return 200; the webhook returns 401 without its secret.
+    - The 22:00 cron logged `Channel broadcast sent (regular)` and posted [t.me/hazey_sg/71](https://t.me/hazey_sg/71) at 22:00:58 SGT: PSI 87–114, arrows against 9 pm, the masks block, and dashboard and masks buttons.
+    - Read back from `t.me/s/hazey_sg`, it rendered bold, italic and links, with no literal tags or entities.
+  - **Not yet verified:** the owner's look on a phone. A breach or hourly post (shelter block, two-button second row) hasn't happened in production yet.
+- **Rollback:** `npx wrangler rollback 8d7d31d4-ee84-4a17-855f-906f4c09b036` restores the previous plain-text format.
 
 ## Free N95 mask finder — live since 17 October 2026, 16:57 SGT
 
@@ -20,7 +47,7 @@ Asked for: "link the mask distribution sites". The owner chose a finder on the d
   - **Current list:** 150 points as at 17 Oct 2026, 4:52 pm SGT.
   - **When to rerun:** when HazeMaskGoWhere adds, moves or removes points. Then run `npm test`, deploy, and record it here.
 - **Switch:** `MASK_DISTRIBUTION: "on"` in `wrangler.jsonc` vars; `/api/psi` reports it as `masksActive`. **When distribution ends, remove that line and redeploy.**
-  - **On:** the dashboard shows `#masks` and the hero link; `/masks` answers from the saved list; channel posts at any PSI level add "Free N95 masks:" (counts, finder link, `/masks`, "Live stock: go.gov.sg/hazemask") and a "Find free N95 masks" button.
+  - **On:** the dashboard shows `#masks` and the hero link; `/masks` answers from the saved list; channel posts at any PSI level add a "😷 Free N95 masks" block (counts, "send /masks to @hazey_sg_bot", "Live stock: go.gov.sg/hazemask") and a "😷 Free N95 masks" button on the second button row (format since 19 October; see "Channel post format" above).
   - **Off:** the section and the hero link are hidden; `/masks` says distribution isn't running and links HazeMaskGoWhere; channel posts are unchanged.
 - **No stock anywhere:** every list says when it was saved and tells people to check live stock on HazeMaskGoWhere before going.
 - **Dashboard** (`#masks`):
@@ -52,10 +79,10 @@ Asked for: improvements that keep Singaporeans updated on haze. The owner chose 
   - **Lookups:** postal codes use OneMap through `lookupPostal`. If OneMap fails, the bot still replies (offering the location button), and the update is marked sent.
   - **Privacy:** locations and postal codes are never stored or logged.
 - **Bot command menu** is defined once as `BOT_COMMANDS` in `src/telegram.js` (psi, pm25, shelter, help, start). The scheduled job sends it with `setMyCommands` at minute 10 of every hour, and `scripts/setup-telegram.js` uses the same list. This fixes the missing `/pm25` without rerunning the setup helper or rotating the webhook secret. Only failures are logged (`Bot command menu update failed: …`, never the token).
-- **Channel posts** (`channelMessage` in `src/broadcast.js`): when the highest regional PSI is above 200, posts add a "Haze shelters:" block.
-  - **Contents:** the shared `shelterNotice` text, which mentions the 10 pm community club hours above 300, a link to `<dashboard>/#shelters`, "send /shelter to @hazey_sg_bot", and a "Find a haze shelter" button.
-  - **At 200 or below,** posts are unchanged. Episode logic is untouched.
-- **Shared copy** in `public/psi.js`: `regionList` ("the Central region", "the North and West regions", "all five regions") replaces the dashboard's old "in the Central" wording, and `shelterNotice` is used by the dashboard, bot and channel. `public/geo.js` now also exports `SHELTER_KINDS` and `directionsUrl`.
+- **Channel posts** (then `channelMessage`, now `channelPost` in `src/broadcast.js`): when the highest regional PSI is above 200, posts add a shelter block.
+  - **Contents (since 19 October):** a "🏠 Haze shelters" block with NEA's rule (the 10 pm community club hours above 300), "send /shelter to @hazey_sg_bot", and a "🏠 Nearest shelter" button. Until 19 October it used `shelterNotice`, a raw `#shelters` link and a "Find a haze shelter" button.
+  - **At 200 or below,** there is no shelter block. Episode logic is untouched.
+- **Shared copy** in `public/psi.js`: `regionList` ("the Central region", "the North and West regions", "all five regions") replaces the dashboard's old "in the Central" wording, and `shelterNotice` is used by the dashboard and bot. The channel has used its own shorter shelter wording since 19 October. `public/geo.js` now also exports `SHELTER_KINDS` and `directionsUrl`.
 - **Accessibility:** the screen-reader live region is now `#announcer` at the top of `<main>`, no longer inside the Telegram panel, so it can't be hidden with that panel.
 - **Verification:**
   - **Tests:** 53/53 Node tests, 7 new. They cover region wording and the shelter notice at 200/201 and 300/301; `/shelter` by postal code (three nearest, buttons, rule from the saved PSI); private and group locations; bare and invalid `/shelter`; OneMap 429 handling (reply sent, update marked sent, no code or coordinates in logs); `/help`; channel shelter lines above 200, the 10 pm line above 300 and none at 199; and the minute-10 menu sync, including no token and failure without leaking the token.
@@ -121,16 +148,17 @@ The owner, GitHub account `gabrieltang515`, requested a web app and Telegram bot
 
 ## Remaining steps
 
-1. **Switch the mask finder off when distribution ends (owner or agent).** Remove `"MASK_DISTRIBUTION": "on"` from `wrangler.jsonc` vars and deploy. While it runs, regenerate the list with `node scripts/build-mask-sites.js` if HazeMaskGoWhere changes its collection points, then test and deploy.
-2. **Confirm `/masks` in Telegram (owner).** Send `/masks 530572` (expect Ci Yuan CC first, about 600 m, labelled "CC counter", with no stock claimed). Then send plain `/masks`, tap "📍 Share my location", and check that mask points (not shelters) come back. Check that the menu lists `/masks` after the next minute-10 sync.
-3. **Check HazeMaskGoWhere's terms of use (owner).** They render only in a browser at gowhere.gov.sg.
-4. **Confirm `/shelter` and the menu in Telegram (owner).** From the owner's Telegram account:
+1. **Check the new channel post format on a phone (owner).** Open [@hazey_sg](https://t.me/hazey_sg) and look at the first post since 19 October 21:35 SGT. Check the bold headline, coloured dots, arrows, footer links and the two button rows render properly, with no literal `<b>` or `&amp;`. If anything looks wrong, roll back with `npx wrangler rollback 8d7d31d4-ee84-4a17-855f-906f4c09b036` and note it here.
+2. **Switch the mask finder off when distribution ends (owner or agent).** Remove `"MASK_DISTRIBUTION": "on"` from `wrangler.jsonc` vars and deploy. While it runs, regenerate the list with `node scripts/build-mask-sites.js` if HazeMaskGoWhere changes its collection points, then test and deploy.
+3. **Confirm `/masks` in Telegram (owner).** Send `/masks 530572` (expect Ci Yuan CC first, about 600 m, labelled "CC counter", with no stock claimed). Then send plain `/masks`, tap "📍 Share my location", and check that mask points (not shelters) come back. Check that the menu lists `/masks` after the next minute-10 sync.
+4. **Check HazeMaskGoWhere's terms of use (owner).** They render only in a browser at gowhere.gov.sg.
+5. **Confirm `/shelter` and the menu in Telegram (owner).** From the owner's Telegram account:
    - Send `/shelter 530572` to `@hazey_sg_bot`. Expect Ang Mo Kio-Hougang Pinetree RN first, under 100 m.
    - Send plain `/shelter`, tap "📍 Share my location", and check the three shelters are nearby.
    - Check the command menu shows `/psi`, `/pm25`, `/shelter`, `/help` and `/start`. Telegram clients can cache the menu, so reopen the chat if needed.
 
    Watch `npx wrangler tail hazey` while testing. Until this is done, don't describe `/shelter` as verified live.
-5. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
+6. **Refresh the shelter list** when the People's Association publishes a new one: transcribe it to a new CSV in `docs/`, update `SOURCE_CSV`, `LIST_AS_AT` and `LIST_URL` in `scripts/build-shelters.js`, rerun it, review its warnings, and update the footer link in `public/index.html`.
 
 Optional:
 
@@ -153,7 +181,7 @@ Optional:
 | Telegram bot | `@hazey_sg_bot` (username in `wrangler.jsonc` vars; token and webhook secret are Worker secrets) |
 | Telegram channel | `@hazey_sg` (`TELEGRAM_CHANNEL_ID` in `wrangler.jsonc` vars; the bot is a channel admin with Post Messages) |
 | D1 migrations applied (production) | `0001`–`0006` (`0006` drops the unused `mask_sources`) |
-| Current deployment version | `8d7d31d4-ee84-4a17-855f-906f4c09b036` (free N95 mask finder from a saved list; 17 Oct 2026 16:57 SGT); previous `9aa6fd22-5e31-4575-aa8a-9c2c9fcd568f` (live mask fetch, blocked by HazeMaskGoWhere); before that `6eaf95b2-9739-41ed-95c4-4ca54648786b` (bot `/shelter`, channel shelter pointers, menu sync; 15 Oct 2026 21:00 SGT); previous `19bbb6bc-fbcb-4813-af44-5ce157db6ba3` (PM2.5 overview and shelter finder); before that `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release) |
+| Current deployment version | `dcf926d6-41f6-4a54-9d21-b69f7330e3ee` (channel post format; 19 Oct 2026 21:35 SGT); previous `8d7d31d4-ee84-4a17-855f-906f4c09b036` (free N95 mask finder from a saved list; 17 Oct 2026 16:57 SGT); before that `9aa6fd22-5e31-4575-aa8a-9c2c9fcd568f` (live mask fetch, blocked by HazeMaskGoWhere); before that `6eaf95b2-9739-41ed-95c4-4ca54648786b` (bot `/shelter`, channel shelter pointers, menu sync; 15 Oct 2026 21:00 SGT); previous `19bbb6bc-fbcb-4813-af44-5ce157db6ba3` (PM2.5 overview and shelter finder); before that `374e97dd-c9a6-4bd3-86ea-8013dde66e78` (channel release) |
 | Worker secrets | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `NEA_API_KEY` |
 
 Cloudflare sign-in was completed successfully through Wrangler OAuth. On 15 October the Mac's Wrangler login had expired and was renewed with `npx wrangler login`; approve the browser page while that command is still waiting, because it times out after about two minutes (approving the Cloudflare dashboard alone does not log Wrangler in). The account originally had no Workers or D1 databases. The global `hazey.workers.dev` name was unavailable, so `gabrieltang515.workers.dev` was registered for this account. No paid plan or paid service was enabled. Keep the existing resources and Free requirement.
